@@ -1,0 +1,17 @@
+# ── 构建产物 ──
+build/
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+
+# ── 第三方库与 HAL 驱动（体积大，不纳入版本控制；交付包另行完整打包）──
+Drivers/
+third_party/
+
+# ── 编辑器 / 系统杂项 ──
+.vscode/
+.DS_Store
+Thumbs.db
