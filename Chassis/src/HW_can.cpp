@@ -1,17 +1,21 @@
 /**
  *******************************************************************************
  * @file      : HW_can.cpp
- * @brief     : CAN 收发基础封装实现
+ * @brief     : CAN 收发基础封装实现 + 接收分发（底盘板）
  * @history   :
  *  Version     Date            Author          Note
  *  V1.0.0      2026-09-18      Hello World     1. 考核骨架：CanFilter_Init + CAN_Send_Msg
- *                                                全量提供，接收分发回调掏空
+ *  V1.1.0      2026-10-19      <author>        1. 补全按 ID 分发的路由
  *******************************************************************************
  * @attention :
- *  接收中断回调 HAL_CAN_RxFifo0/1MsgPendingCallback 已在此预留，仅完成「取 8 字节 +
- *  再次使能接收中断」，具体「按帧 ID 分发」逻辑留给新人：
- *    - M3508 / DM 电机反馈：调用对应电机的 decode(can?_rx_data)
- *    - 双板通讯帧：调用新人自写的协议解码
+ *  【CAN 接收回调里为什么不能干重活】
+ *  中断回调是「插队执行」的：它运行时控制循环停着。所以这里只做最短路径的
+ *  事情——比对 ID、拷贝 8 字节进电机对象、记一下在线时间，然后立刻返回。
+ *  任何解算、打印、等待都不能放进来。
+ *
+ *  【为什么两路 CAN 的帧走同一个分发函数】
+ *  实车接线可能调整（哪个电机接哪一路），但帧 ID 是全局唯一的。按 ID 分发
+ *  而不是按「哪路 CAN」分发，接线换了代码也不用改，也更不容易漏帧。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -21,6 +25,10 @@
 #include "HW_can.hpp"
 
 #include "can.h"
+#include "gimbal_chassis_comm.hpp"
+#include "ins_all.hpp"
+#include "motor.hpp"
+#include "robot.hpp"
 
 /* Private variables ---------------------------------------------------------*/
 static CAN_RxHeaderTypeDef rx_header1;
@@ -28,6 +36,9 @@ static CAN_RxHeaderTypeDef rx_header2;
 static uint8_t can1_rx_data[8];
 static uint8_t can2_rx_data[8];
 static uint32_t p_tx_mailbox;
+
+/* Private function prototypes -----------------------------------------------*/
+static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8]);
 
 /* Exported function definitions ---------------------------------------------*/
 
@@ -71,40 +82,90 @@ void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
 }
 
 /**
- * @brief   CAN1 FIFO0 接收中断回调（新人填写分发逻辑）
+ * @brief   CAN1 FIFO0 接收中断回调
  * @param   hcan: CAN 句柄
  * @retval  None
- * @note    此处只取了 8 字节并重新使能接收中断，具体分发由新人实现
  */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan == &hcan1) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header1,
                              can1_rx_data) == HAL_OK) {
-      /* TODO【新人任务】: 在此按 rx_header1.StdId 路由 8 字节 can1_rx_data。
-       * 判定方法：把 StdId 与各电机的接收 ID（GetRxId）及双板通讯帧 ID 逐一比对：
-       *   - 命中某电机的接收 ID：调用该电机 decode(can1_rx_data) 解包反馈；
-       *   - 命中双板通讯帧 ID：调用自己的 GimbalChassisComm 解码；
-       *   - 都未命中：丢弃（返回前记得重新使能接收中断，见下方调用）。
-       */
+      /* 只处理标准帧（扩展帧本次用不到） */
+      if (rx_header1.IDE == CAN_ID_STD) {
+        DispatchCanFrame(rx_header1.StdId, can1_rx_data);
+      }
     }
   }
   HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO0_MSG_PENDING);
 }
 
 /**
- * @brief   CAN2 FIFO1 接收中断回调（新人填写分发逻辑）
+ * @brief   CAN2 FIFO1 接收中断回调
  * @param   hcan: CAN 句柄
  * @retval  None
- * @note    同上，具体分发由新人实现
  */
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan == &hcan2) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &rx_header2,
                              can2_rx_data) == HAL_OK) {
-      /* TODO【新人任务】: 同 FIFO0，按 rx_header2.StdId 路由 8 字节 can2_rx_data。 */
+      if (rx_header2.IDE == CAN_ID_STD) {
+        DispatchCanFrame(rx_header2.StdId, can2_rx_data);
+      }
     }
   }
   HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO1_MSG_PENDING);
+}
+
+/* Private function definitions ----------------------------------------------*/
+
+/**
+ * @brief 按标准帧 ID 把 8 字节路由到对应的电机 / 双板协议
+ * @note  查表顺序：先电机（数量多、频率高），再双板帧；都没命中就丢弃。
+ *        电机槽位编号与 Robot::notifyMotorRx 的约定一致：
+ *        0~3 = 驱动轮，4~7 = 舵电机。
+ */
+static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
+{
+  robot::Robot *robot = GetRobot();
+
+  /* ---- 驱动电机 M3508：反馈 ID = 0x200 + id ---- */
+  for (int i = 0; i < 4; ++i) {
+    hello_world::motor::Motor *motor = GetMotorWheel(i);
+    if (motor == nullptr) {
+      continue;
+    }
+    if (hello_world::motor::M3508::GetRxId(motor->id()) == std_id) {
+      motor->decode(data);
+      if (robot != nullptr) {
+        robot->notifyMotorRx(i);
+      }
+      return;
+    }
+  }
+
+  /* ---- 转向电机 GM6020：反馈 ID = 0x204 + id ---- */
+  for (int i = 0; i < 4; ++i) {
+    hello_world::motor::Motor *motor = GetMotorSteer(i);
+    if (motor == nullptr) {
+      continue;
+    }
+    if (hello_world::motor::GM6020::GetRxId(motor->id()) == std_id) {
+      motor->decode(data);
+      if (robot != nullptr) {
+        robot->notifyMotorRx(4 + i);
+      }
+      return;
+    }
+  }
+
+  /* ---- 双板通信帧（云台 → 底盘，0x211） ---- */
+  robot::GimbalChassisComm *comm = GetGimbalChassisComm();
+  if ((comm != nullptr) && (comm->rx_id() == std_id)) {
+    comm->decode(data);
+    return;
+  }
+
+  /* 其余 ID 一律丢弃（总线上还有别的设备，不认识的帧不要碰） */
 }

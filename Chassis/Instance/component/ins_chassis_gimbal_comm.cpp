@@ -1,12 +1,14 @@
 /**
  *******************************************************************************
  * @file      :ins_chassis_gimbal_comm.cpp
- * @brief     :
+ * @brief     : 底盘板双板通信对象实例化
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成实例化
  *******************************************************************************
  * @attention :
+ *  本板是底盘板（CodePart::Chassis）：发送 C2G 帧（0x210），接收 G2C 帧（0x211）。
+ *  云台板那份实例化文件必须与此严格互补，否则两板「各说各话」。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -23,20 +25,11 @@
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 robot::GimbalChassisComm *GetGimbalChassisComm() {
-  /* TODO【新人任务】:
-   * 返回本板双板通讯对象单例。
-   *
-   * 你要做：
-   *   1. 静态定义一个 robot::GimbalChassisComm 对象，构造时传入：
-   *      - CodePart：本板是 Chassis 还是 Gimbal（决定编解码方向）。
-   *      - tx_id / rx_id：本板发送帧 / 接收帧的 CAN 标准帧 ID（两板协商一致）。
-   *   2. 返回其地址。
-   *
-   * 约束 / 提示：
-   *   - 类定义在 RobotComponents/component/gimbal_chassis_comm.hpp（encode/decode 由你实现）。
-   *   - CAN ID 建议从 0x200 之后的空闲标准帧 ID 里选，避开电机反馈 ID。
-   */
-  return nullptr;
+  static robot::GimbalChassisComm s_comm(
+      robot::GimbalChassisComm::CodePart::Chassis,
+      robot::kCommIdChassisToGimbal,   ///< 本板发送
+      robot::kCommIdGimbalToChassis);  ///< 本板接收
+  return &s_comm;
 }
 
 /* Private function definitions ----------------------------------------------*/

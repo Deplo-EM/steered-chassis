@@ -1,37 +1,391 @@
 /**
  *******************************************************************************
  * @file      :robot.cpp
- * @brief     :
+ * @brief     : 底盘板顶层状态机实现（模式逻辑 + 安全保护）
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成编写
  *******************************************************************************
  * @attention :
+ *  拨杆定义（第一次上车前请先确认手感，可以在 tests 或调试器里看 mode_）：
+ *    左拨杆  上 = 分离模式   中 = 跟随模式   下 = 小陀螺模式
+ *    右拨杆  下 = 急停（所有电机立即归零）   上/中 = 允许输出
+ *
+ *  摇杆定义：
+ *    左摇杆  上下 = 前进/后退（云台坐标系）   左右 = 左移/右移
+ *    右摇杆  上下 = 云台 pitch                左右 = 云台 yaw 转速
+ *    拨轮    分离模式下 = 底盘自转角速度      小陀螺模式下 = 自旋快慢
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
  *******************************************************************************
  */
 /* Includes ------------------------------------------------------------------*/
+#include "robot.hpp"
+
+#include <cmath>
+
+#include "DT7.hpp"
+#include "chassis.hpp"
+#include "gimbal_chassis_comm.hpp"
+#include "imu.hpp"
+#include "tick.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
-/* Private types -------------------------------------------------------------*/
+
+namespace {
+
+/** 控制周期，单位 s（TIM6 配置为 1kHz） */
+constexpr float kDt = 0.001f;
+
+/* ---------------- 速度上限（安全相关，先给保守值） ---------------- */
+constexpr float kMaxLinearSpeed = 2.0f;  ///< 平移速度上限，m/s
+constexpr float kMaxChassisW = 6.0f;     ///< 底盘自转角速度上限，rad/s
+constexpr float kMaxSpinW = 6.0f;        ///< 小陀螺最大自旋，rad/s（≈1 转/秒）
+constexpr float kMinSpinW = 1.5f;        ///< 小陀螺最小自旋，rad/s（保证「非零旋转分量」）
+
+/* ---------------- 加速度限幅（让起步/停车平顺，保护机械） ---------------- */
+constexpr float kLinearAccel = 8.0f;    ///< m/s²
+constexpr float kAngularAccel = 25.0f;  ///< rad/s²
+
+/* ---------------- 跟随模式增益 ---------------- */
+/** 角度误差 → 目标角速度的比例（1/s）。Kp=4 表示误差 1rad 时目标转速 4rad/s，
+ *  闭环时间常数约 0.25s，既跟得上又不会来回摆。 */
+constexpr float kFollowKp = 4.0f;
+/** 用底盘陀螺仪角速度做阻尼：车已经在转了就少给一点，抑制过冲 */
+constexpr float kFollowKd = 0.15f;
+
+/* ---------------- 云台指令 ---------------- */
+constexpr float kMaxGimbalYawRate = 6.0f;  ///< 云台 yaw 最大转速，rad/s
+constexpr float kGimbalPitchRate = 2.0f;   ///< 云台 pitch 最大转速，rad/s
+/** pitch 软件限位（保守值，实车按机械行程改）。到限位后不再往同方向推。 */
+constexpr float kPitchLowerLimit = -0.9f;  ///< rad（约 −51°）
+constexpr float kPitchUpperLimit = 0.7f;   ///< rad（约 +40°）
+/** 右摇杆推上去时枪口应该抬高；若实车相反，把这里改成 −1 */
+constexpr float kPitchStickSign = 1.0f;
+
+/* ---------------- 状态机 / 在线检测 ---------------- */
+constexpr uint32_t kRemoteOfflineMs = 100;   ///< 遥控器掉线阈值
+constexpr uint32_t kMotorOfflineMs = 100;    ///< 电机掉线阈值
+constexpr uint32_t kResurrectionMs = 500;    ///< 恢复自检持续时长
+
+/** 把 value 以每周期最多 max_delta 的速度拉向 target */
+inline float Slew(float value, float target, float max_delta)
+{
+  const float diff = target - value;
+  if (diff > max_delta) {
+    return value + max_delta;
+  }
+  if (diff < -max_delta) {
+    return value - max_delta;
+  }
+  return target;
+}
+
+}  // namespace
+
 /* Private variables ---------------------------------------------------------*/
-/* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
+
+void robot::Robot::init()
+{
+  rc_checker_.init(kRemoteOfflineMs);
+  for (int i = 0; i < kMotorSlotNum; ++i) {
+    motor_checkers_[i].init(kMotorOfflineMs);
+  }
+
+  state_ = LifeState::kDead;
+  state_enter_tick_ = hello_world::tick::GetTickMs();
+  mode_ = ChassisMode::kSeparate;
+  estop_ = false;
+  ramped_.reset();
+  gimbal_yaw_rate_ = 0.0f;
+  gimbal_pitch_target_ = 0.0f;
+  initialized_ = (rc_ != nullptr) && (imu_ != nullptr) && (chassis_ != nullptr) &&
+                 (comm_ != nullptr);
+}
+
+void robot::Robot::update()
+{
+  if (!initialized_) {
+    return;
+  }
+
+  /* ---- 1. 更新传感器（IMU 必须每个周期都读，标定期间也要读） ---- */
+  imu_->update();
+
+  /* ---- 2. 读遥控器状态 ---- */
+  updateInput();
+
+  /* ---- 3. 状态迁移 ---- */
+  updateStateMachine();
+
+  /* ---- 4. 生成指令并下发（急停在这条链路的最外层生效） ---- */
+  applyOutput();
+
+  /* ---- 5. 把本板状态写进通信帧，CommTask 会把它发出去 ---- */
+  updateCommData();
+}
+
+void robot::Robot::notifyRemoteRx()
+{
+  rc_checker_.update();
+}
+
+void robot::Robot::notifyMotorRx(int slot)
+{
+  if (slot >= 0 && slot < kMotorSlotNum) {
+    motor_checkers_[slot].update();
+  }
+}
+
+bool robot::Robot::isRemoteOnline()
+{
+  return !rc_checker_.isOffline();
+}
+
+bool robot::Robot::areAllMotorsOnline()
+{
+  for (int i = 0; i < kMotorSlotNum; ++i) {
+    if (motor_checkers_[i].isOffline()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+float robot::Robot::delta() const
+{
+  if (comm_ == nullptr) {
+    return 0.0f;
+  }
+  return robot::WrapPi(comm_->gimbal_data().yaw_joint);
+}
+
 /* Private function definitions ----------------------------------------------*/
 
-/* ============================================================================
- * 【新人任务】实现 robot.hpp 中声明的状态机。
- *
- * 你要做：
- *   1. 周期入口：按「更新数据 → 状态机迁移 → 生成指令 → 下发」的顺序组织 update()。
- *   2. 三态实现：Dead 时输出全零并等待就绪条件；Resurrection 时做自检与复位（如等待
- *      电机使能、IMU 零漂收敛）；Working 时执行正常控制逻辑。
- *   3. 各工作模式（分离 / 随动 / 小陀螺）的指令生成分支。
- *
- * 约束 / 提示：
- *   - 状态切换时记得复位上一状态残留的指令，避免电机突变。
- *   - 所有下发指令统一经过本类，急停判断放在最外层，确保任何分支都先过急停。
- * ==========================================================================*/
+void robot::Robot::updateInput()
+{
+  mode_ = readModeSwitch();
+  estop_ = readEstopSwitch();
+}
+
+robot::ChassisMode robot::Robot::readModeSwitch() const
+{
+  if (rc_ == nullptr) {
+    return ChassisMode::kSeparate;
+  }
+  switch (rc_->rc_l_switch()) {
+    case hello_world::remote_control::kSwitchStateUp:
+      return ChassisMode::kSeparate;
+    case hello_world::remote_control::kSwitchStateMid:
+      return ChassisMode::kFollow;
+    case hello_world::remote_control::kSwitchStateDown:
+      return ChassisMode::kSpin;
+    default:
+      return ChassisMode::kSeparate;
+  }
+}
+
+bool robot::Robot::readEstopSwitch() const
+{
+  if (rc_ == nullptr) {
+    return true;  /* 没有遥控器 = 必须停机（失效即归零） */
+  }
+  /* 右拨杆打到最下面 = 急停 */
+  const bool local_estop =
+      (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown);
+  /* 云台板那边如果判定急停（它自己也有遥控器），也一并对本板生效 */
+  const bool peer_estop =
+      (comm_ != nullptr) ? comm_->gimbal_data().estop : false;
+  return local_estop || peer_estop;
+}
+
+void robot::Robot::updateStateMachine()
+{
+  const bool remote_ok = isRemoteOnline();
+  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  const bool motors_ok = areAllMotorsOnline();
+  /* 对方在线且已经进入 Working：云台没准备好就不许开车（枪口会乱晃） */
+  const bool peer_ok =
+      (comm_ != nullptr) && !comm_->isOffline() && comm_->gimbal_data().working;
+  const bool all_ok = remote_ok && imu_ok && motors_ok && peer_ok;
+
+  const uint32_t now = hello_world::tick::GetTickMs();
+
+  switch (state_) {
+    case LifeState::kDead:
+      if (all_ok) {
+        enterState(LifeState::kResurrection);
+      }
+      break;
+
+    case LifeState::kResurrection:
+      if (!all_ok) {
+        enterState(LifeState::kDead);
+      } else if ((now - state_enter_tick_) >= kResurrectionMs) {
+        enterState(LifeState::kWorking);
+      }
+      break;
+
+    case LifeState::kWorking:
+      if (!all_ok) {
+        /* 任何一项安全条件丢失：立刻退回 Dead，输出归零 */
+        enterState(LifeState::kDead);
+      }
+      break;
+
+    default:
+      enterState(LifeState::kDead);
+      break;
+  }
+}
+
+void robot::Robot::enterState(LifeState next)
+{
+  if (next == state_) {
+    return;
+  }
+  state_ = next;
+  state_enter_tick_ = hello_world::tick::GetTickMs();
+
+  if (next == LifeState::kWorking) {
+    initWorkingTargets();
+  } else {
+    /* 离开 Working：把指令清干净，避免下次进入时「攒着的目标」突然释放 */
+    ramped_.reset();
+    gimbal_yaw_rate_ = 0.0f;
+    chassis_->stop();
+  }
+}
+
+void robot::Robot::initWorkingTargets()
+{
+  ramped_.reset();
+
+  /* pitch 目标从「当前实际角度」接着走：如果直接给 0，进入 Working 的瞬间
+   * 云台会猛地甩回中位。这叫「无扰切换」。 */
+  gimbal_pitch_target_ = (comm_ != nullptr) ? comm_->gimbal_data().pitch_joint
+                                            : 0.0f;
+  gimbal_pitch_target_ =
+      robot::Clamp(gimbal_pitch_target_, kPitchLowerLimit, kPitchUpperLimit);
+  gimbal_yaw_rate_ = 0.0f;
+
+  /* 清掉上一状态残留的 PID 积分与逆解历史 */
+  chassis_->stop();
+}
+
+void robot::Robot::generateCommand()
+{
+  const bool remote_ok = isRemoteOnline();
+
+  /* ---------------- 平移：摇杆 → 云台坐标系速度 ---------------- */
+  ChassisMotion raw;
+  if (remote_ok) {
+    /* 左摇杆向上（+）→ 沿云台 x 轴前进；
+     * 左摇杆向右（+）→ 云台系 y 轴是「左」，所以取负。 */
+    raw.vx = rc_->rc_lv() * kMaxLinearSpeed;
+    raw.vy = -rc_->rc_lh() * kMaxLinearSpeed;
+  }
+
+  /* ---------------- 旋转：按模式给 w ---------------- */
+  switch (mode_) {
+    case ChassisMode::kSeparate:
+      /* 分离：底盘不自旋，w 直接由拨轮给（操作手想转多少就转多少） */
+      raw.w = remote_ok ? (rc_->rc_wheel() * kMaxChassisW) : 0.0f;
+      break;
+
+    case ChassisMode::kFollow: {
+      /* 跟随：让车头对准云台。
+       * δ = 云台朝向 − 车头朝向，δ>0 说明云台在车头左边，车应该向左转（w>0）。
+       * 再加一项陀螺仪阻尼，避免转过头。 */
+      const float delta_rad = delta();
+      float w = kFollowKp * delta_rad - kFollowKd * imu_->gyroZ();
+      raw.w = robot::Clamp(w, -kMaxChassisW, kMaxChassisW);
+      break;
+    }
+
+    case ChassisMode::kSpin: {
+      /* 小陀螺：必须有非零旋转分量。
+       * 拨轮大小决定转速，正负决定转向；拨轮回中时用最小转速继续转。 */
+      const float wheel = remote_ok ? rc_->rc_wheel() : 0.0f;
+      const float magnitude =
+          kMinSpinW + std::fabs(wheel) * (kMaxSpinW - kMinSpinW);
+      const float direction = (wheel < -0.05f) ? -1.0f : 1.0f;
+      raw.w = direction * magnitude;
+      break;
+    }
+
+    default:
+      raw.reset();
+      break;
+  }
+
+  /* ---------------- 加速度限幅 ---------------- */
+  ramped_.vx = Slew(ramped_.vx, raw.vx, kLinearAccel * kDt);
+  ramped_.vy = Slew(ramped_.vy, raw.vy, kLinearAccel * kDt);
+  ramped_.w = Slew(ramped_.w, raw.w, kAngularAccel * kDt);
+
+  /* ---------------- 云台指令 ---------------- */
+  updateGimbalCommand();
+}
+
+void robot::Robot::updateGimbalCommand()
+{
+  if (rc_ == nullptr || !isRemoteOnline()) {
+    gimbal_yaw_rate_ = 0.0f;
+    return;
+  }
+
+  /* 右摇杆向右（+）→ 云台顺时针转 → yaw 角减小（逆时针为正） */
+  gimbal_yaw_rate_ = -rc_->rc_rh() * kMaxGimbalYawRate;
+
+  /* 右摇杆向上（+）→ 枪口抬高。这里给的是「关节角目标」，由云台板做位置环。 */
+  gimbal_pitch_target_ +=
+      rc_->rc_rv() * kPitchStickSign * kGimbalPitchRate * kDt;
+  gimbal_pitch_target_ =
+      robot::Clamp(gimbal_pitch_target_, kPitchLowerLimit, kPitchUpperLimit);
+}
+
+void robot::Robot::applyOutput()
+{
+  if (state_ != LifeState::kWorking) {
+    /* 未就绪：自检阶段可以让舵角慢慢回中，其余一律不动 */
+    if (state_ == LifeState::kResurrection) {
+      chassis_->centerSteer(kDt);
+    } else {
+      chassis_->stop();
+    }
+    return;
+  }
+
+  /* ★ 急停闸门：放在这里，保证任何模式、任何指令都绕不过它 ★ */
+  if (estop_) {
+    chassis_->stop();
+    gimbal_yaw_rate_ = 0.0f;
+    return;
+  }
+
+  generateCommand();
+
+  /* 把云台系速度指令 + 当前 δ 交给底盘模块：它内部先旋转到车体系再逆解 */
+  chassis_->setMotion(ramped_, delta());
+  chassis_->update(kDt);
+}
+
+void robot::Robot::updateCommData()
+{
+  if (comm_ == nullptr) {
+    return;
+  }
+  GimbalChassisComm::ChassisData& d = comm_->chassis_data();
+  d.working = (state_ == LifeState::kWorking);
+  d.estop = estop_;
+  d.dbus_online = isRemoteOnline();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated();
+  d.gimbal_enable = d.working && !estop_;
+  d.mode = mode_;
+  d.yaw_rate = d.gimbal_enable ? gimbal_yaw_rate_ : 0.0f;
+  d.pitch_target = gimbal_pitch_target_;
+}
