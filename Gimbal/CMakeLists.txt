@@ -19,6 +19,11 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
+# 使用 HAL 的毫秒滴答（HAL_GetTick）作为 tick.cpp 的时间基准。
+# tick.cpp 内部按宏选择实现，不定义这个宏的话 GetTickMs() 根本不会被编译出来，
+# 链接时会报 "undefined reference to GetTickMs"。
+add_compile_definitions(USE_HAL_TICK)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 get_filename_component(CMAKE_CURRENT_SOURCE_PARENT_DIR
                        ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)

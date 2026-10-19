@@ -1,17 +1,15 @@
 /**
  *******************************************************************************
  * @file      : HW_can.cpp
- * @brief     : CAN 收发基础封装实现
+ * @brief     : CAN 收发基础封装实现 + 接收分发（云台板）
  * @history   :
  *  Version     Date            Author          Note
  *  V1.0.0      2026-09-18      Hello World     1. 考核骨架：CanFilter_Init + CAN_Send_Msg
- *                                                全量提供，接收分发回调掏空
+ *  V1.1.0      2026-10-19      <author>        1. 补全按 ID 分发的路由
  *******************************************************************************
  * @attention :
- *  接收中断回调 HAL_CAN_RxFifo0/1MsgPendingCallback 已在此预留，仅完成「取 8 字节 +
- *  再次使能接收中断」，具体「按帧 ID 分发」逻辑留给新人：
- *    - M3508 / DM 电机反馈：调用对应电机的 decode(can?_rx_data)
- *    - 双板通讯帧：调用新人自写的协议解码
+ *  与底盘板的区别：本板只有两个达妙电机（反馈 ID 0x11 / 0x12）和一帧双板通信。
+ *  ⚠️ 达妙的反馈 ID 是「ID + 0x10」，不是 0x200 系列，别照抄底盘板的判断。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -21,6 +19,17 @@
 #include "HW_can.hpp"
 
 #include "can.h"
+#include "gimbal_chassis_comm.hpp"
+#include "ins_all.hpp"
+#include "iwdg.h"
+#include "motor.hpp"
+#include "robot.hpp"
+
+/* Private constants ---------------------------------------------------------*/
+namespace {
+/** 是否启用「解包底盘帧时喂狗」（与 comm_task.cpp 的开关保持一致） */
+constexpr bool kWatchdogFeedEnable = true;
+}  // namespace
 
 /* Private variables ---------------------------------------------------------*/
 static CAN_RxHeaderTypeDef rx_header1;
@@ -28,6 +37,9 @@ static CAN_RxHeaderTypeDef rx_header2;
 static uint8_t can1_rx_data[8];
 static uint8_t can2_rx_data[8];
 static uint32_t p_tx_mailbox;
+
+/* Private function prototypes -----------------------------------------------*/
+static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8]);
 
 /* Exported function definitions ---------------------------------------------*/
 
@@ -71,40 +83,82 @@ void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
 }
 
 /**
- * @brief   CAN1 FIFO0 接收中断回调（新人填写分发逻辑）
- * @param   hcan: CAN 句柄
- * @retval  None
- * @note    此处只取了 8 字节并重新使能接收中断，具体分发由新人实现
+ * @brief   CAN1 FIFO0 接收中断回调
+ * @note    双板通信帧走 CAN1
  */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan == &hcan1) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header1,
                              can1_rx_data) == HAL_OK) {
-      /* TODO【新人任务】: 在此按 rx_header1.StdId 路由 8 字节 can1_rx_data。
-       * 判定方法：把 StdId 与各电机的接收 ID（GetRxId）及双板通讯帧 ID 逐一比对：
-       *   - 命中某电机的接收 ID：调用该电机 decode(can1_rx_data) 解包反馈；
-       *   - 命中双板通讯帧 ID：调用自己的 GimbalChassisComm 解码；
-       *   - 都未命中：丢弃（返回前记得重新使能接收中断，见下方调用）。
-       */
+      if (rx_header1.IDE == CAN_ID_STD) {
+        DispatchCanFrame(rx_header1.StdId, can1_rx_data);
+      }
     }
   }
   HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO0_MSG_PENDING);
 }
 
 /**
- * @brief   CAN2 FIFO1 接收中断回调（新人填写分发逻辑）
- * @param   hcan: CAN 句柄
- * @retval  None
- * @note    同上，具体分发由新人实现
+ * @brief   CAN2 FIFO1 接收中断回调
+ * @note    达妙电机反馈走 CAN2
  */
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
   if (hcan == &hcan2) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &rx_header2,
                              can2_rx_data) == HAL_OK) {
-      /* TODO【新人任务】: 同 FIFO0，按 rx_header2.StdId 路由 8 字节 can2_rx_data。 */
+      if (rx_header2.IDE == CAN_ID_STD) {
+        DispatchCanFrame(rx_header2.StdId, can2_rx_data);
+      }
     }
   }
   HAL_CAN_ActivateNotification(hcan, CAN_IT_RX_FIFO1_MSG_PENDING);
+}
+
+/* Private function definitions ----------------------------------------------*/
+
+/**
+ * @brief 按标准帧 ID 路由
+ * @note  电机槽位：0 = yaw，1 = pitch（与 Robot::notifyMotorRx 约定一致）
+ */
+static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
+{
+  robot::Robot *robot = GetRobot();
+
+  /* ---- yaw 电机：反馈 ID = id + 0x10 ---- */
+  hello_world::motor::Motor *yaw = GetMotorYaw();
+  if ((yaw != nullptr) &&
+      (hello_world::motor::DM_J4310::GetRxId(yaw->id()) == std_id)) {
+    yaw->decode(data);
+    if (robot != nullptr) {
+      robot->notifyMotorRx(0);
+    }
+    return;
+  }
+
+  /* ---- pitch 电机 ---- */
+  hello_world::motor::Motor *pitch = GetMotorPitch();
+  if ((pitch != nullptr) &&
+      (hello_world::motor::DM_J4310::GetRxId(pitch->id()) == std_id)) {
+    pitch->decode(data);
+    if (robot != nullptr) {
+      robot->notifyMotorRx(1);
+    }
+    return;
+  }
+
+  /* ---- 双板通信帧（底盘 → 云台，0x210） ----
+   * 这里是考核资料里说的「上板在解包下板信息处刷新看门狗」：
+   * 底盘帧里的 dbus_online 就是「遥控器还活着」的证据。 */
+  robot::GimbalChassisComm *comm = GetGimbalChassisComm();
+  if ((comm != nullptr) && (comm->rx_id() == std_id)) {
+    comm->decode(data);
+    if (kWatchdogFeedEnable && comm->chassis_data().dbus_online) {
+      HAL_IWDG_Refresh(&hiwdg);
+    }
+    return;
+  }
+
+  /* 其余 ID 丢弃 */
 }

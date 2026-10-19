@@ -1,12 +1,22 @@
 /**
  *******************************************************************************
  * @file      :robot.hpp
- * @brief     :
+ * @brief     : 云台板顶层状态机
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成编写
  *******************************************************************************
  * @attention :
+ *  【云台板的职责边界】
+ *  云台板不决定「车往哪走」，它只负责「枪口指向哪」。所以它收到的 C2G 帧里
+ *  只有两件事：yaw 转速设定、pitch 角度目标。其余信息（模式、急停、使能）
+ *  都只是「许可 / 禁止」的信号。
+ *
+ *  【两板互保】
+ *  - 底盘板离线 → 云台板 100ms 后判定掉线 → 停止出力；200ms 后看门狗直接把
+ *    板子复位（因为喂狗依赖底盘帧里的「遥控器在线」标志）。
+ *  - 云台板不 Working → 底盘板不允许进入 Working（车不会在枪口乱晃时开动）。
+ *  两条合起来就是考核加分项里的「双板互保」。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -17,30 +27,84 @@
 #define GIMBAL_ROBOT_MODULES_ROBOT_HPP_
 
 /* Includes ------------------------------------------------------------------*/
-/* Exported macro ------------------------------------------------------------*/
-/* Exported constants --------------------------------------------------------*/
-/* Exported types ------------------------------------------------------------*/
-/* Exported variables --------------------------------------------------------*/
-/* Exported function prototypes ----------------------------------------------*/
+#include <cstdint>
 
-/* ============================================================================
- * 【新人任务】声明云台板顶层状态机类 Robot（namespace robot）。
- *
- * 你要做：
- *   1. 设计 Robot 类，作为本板每个控制周期的入口：汇总云台目标角度（来自遥控器 /
- *      键鼠 / 底盘经双板通讯传来的期望值）、IMU 姿态、电机反馈，生成 yaw / pitch
- *      控制指令。
- *   2. 实现「生命状态」三态切换：Dead → Resurrection → Working，并定义各状态
- *      进入 / 退出时的复位动作。
- *   3. 提供注册各模块指针的接口（Gimbal、Imu、yaw / pitch 电机、GimbalChassisComm），
- *      并在每个周期按正确顺序更新数据。
- *
- * 约束 / 提示：
- *   - 与底盘板之间只能通过 GimbalChassisComm 的
- *     CAN 帧交换信息，不能直接互相调用函数或共享变量。
- *   - 控制周期入口由 Task/component/main_task.cpp 的定时中断调用，本类自己不要开中断、
- *     不要死等延时。
- *   - 急停：遥控器拨到急停位时，必须保证所有电机指令归零（硬性验收项）。
- *   - 状态机的基类 / 迁移机制要自己设计，本骨架不提供（裁判系统 / 超电 / 蜂鸣器等组件本骨架也没有，可忽略）。
- * ==========================================================================*/
+#include "module_state.hpp"
+#include "offline_checker.hpp"
+
+namespace hello_world {
+namespace imu {
+class Imu;
+}  // namespace imu
+namespace remote_control {
+class DT7;
+}  // namespace remote_control
+}  // namespace hello_world
+
+namespace robot {
+
+class Gimbal;
+class GimbalChassisComm;
+
+/* Exported types ------------------------------------------------------------*/
+
+/**
+ * @brief 云台板顶层状态机
+ */
+class Robot {
+ public:
+  /** 电机在线检测槽位：0 = yaw，1 = pitch */
+  static constexpr int kMotorSlotNum = 2;
+
+  Robot() = default;
+  ~Robot() = default;
+
+  /* ---------------- 注册 ---------------- */
+  void setRemoteControl(hello_world::remote_control::DT7* rc) { rc_ = rc; }
+  void setImu(hello_world::imu::Imu* imu) { imu_ = imu; }
+  void setGimbal(Gimbal* gimbal) { gimbal_ = gimbal; }
+  void setComm(GimbalChassisComm* comm) { comm_ = comm; }
+
+  void init();
+  void update();
+
+  /* ---------------- 中断侧通知 ---------------- */
+  void notifyRemoteRx();
+  void notifyMotorRx(int slot);
+
+  /* ---------------- 状态查询 ---------------- */
+  LifeState lifeState() const { return state_; }
+  bool isEstopped() const { return estop_; }
+  bool isRemoteOnline();
+  bool areAllMotorsOnline();
+
+ private:
+  void updateInput();
+  void updateStateMachine();
+  void applyOutput(float dt);
+  void updateCommData();
+
+  void enterState(LifeState next);
+
+  hello_world::remote_control::DT7* rc_ = nullptr;
+  hello_world::imu::Imu* imu_ = nullptr;
+  Gimbal* gimbal_ = nullptr;
+  GimbalChassisComm* comm_ = nullptr;
+
+  hello_world::OfflineChecker rc_checker_;
+  hello_world::OfflineChecker motor_checkers_[kMotorSlotNum];
+
+  LifeState state_ = LifeState::kDead;
+  uint32_t state_enter_tick_ = 0;
+  bool initialized_ = false;
+
+  bool estop_ = false;
+  /** yaw 世界系目标（连续累加，不做归一化） */
+  float yaw_target_world_ = 0.0f;
+  /** 上一周期是否处于「允许出力」状态，用于检测使能上升沿 */
+  bool output_enabled_prev_ = false;
+};
+
+}  // namespace robot
+
 #endif /* GIMBAL_ROBOT_MODULES_ROBOT_HPP_ */

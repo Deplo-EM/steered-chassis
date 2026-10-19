@@ -1,37 +1,247 @@
 /**
  *******************************************************************************
  * @file      :robot.cpp
- * @brief     :
+ * @brief     : 云台板顶层状态机实现
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成编写
  *******************************************************************************
  * @attention :
+ *  【使能上升沿为什么要重新对齐目标】
+ *  平时 yaw 的目标角是「积分」出来的（转速 × 时间）。如果停止出力一段时间
+ *  （急停、掉线恢复），这段时间里操作手可能已经把云台用手掰走了。恢复的瞬间
+ *  如果直接沿用旧目标，云台会「突然发现自己在几百毫秒前的角度上」然后猛地
+ *  甩回去。所以每次从「禁止出力」变成「允许出力」时，把目标重新对齐到当前
+ *  实际角度，实现无扰恢复。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
  *******************************************************************************
  */
 /* Includes ------------------------------------------------------------------*/
+#include "robot.hpp"
+
+#include <cmath>
+
+#include "DT7.hpp"
+#include "gimbal.hpp"
+#include "gimbal_chassis_comm.hpp"
+#include "imu.hpp"
+#include "tick.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
-/* Private types -------------------------------------------------------------*/
+
+namespace {
+
+/** 控制周期，s */
+constexpr float kDt = 0.001f;
+
+/** 遥控器掉线阈值，ms */
+constexpr uint32_t kRemoteOfflineMs = 100;
+/** 电机掉线阈值，ms */
+constexpr uint32_t kMotorOfflineMs = 100;
+/** 恢复自检时长，ms */
+constexpr uint32_t kResurrectionMs = 500;
+
+}  // namespace
+
 /* Private variables ---------------------------------------------------------*/
-/* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
+
+void robot::Robot::init()
+{
+  rc_checker_.init(kRemoteOfflineMs);
+  for (int i = 0; i < kMotorSlotNum; ++i) {
+    motor_checkers_[i].init(kMotorOfflineMs);
+  }
+
+  state_ = LifeState::kDead;
+  state_enter_tick_ = hello_world::tick::GetTickMs();
+  estop_ = false;
+  yaw_target_world_ = 0.0f;
+  output_enabled_prev_ = false;
+  initialized_ = (rc_ != nullptr) && (imu_ != nullptr) && (gimbal_ != nullptr) &&
+                 (comm_ != nullptr);
+}
+
+void robot::Robot::update()
+{
+  if (!initialized_) {
+    return;
+  }
+
+  /* 1. 传感器 */
+  imu_->update();
+
+  /* 2. 输入（急停判据） */
+  updateInput();
+
+  /* 3. 状态迁移 */
+  updateStateMachine();
+
+  /* 4. 生成并下发指令 */
+  applyOutput(kDt);
+
+  /* 5. 回填通信帧 */
+  updateCommData();
+}
+
+void robot::Robot::notifyRemoteRx()
+{
+  rc_checker_.update();
+}
+
+void robot::Robot::notifyMotorRx(int slot)
+{
+  if (slot >= 0 && slot < kMotorSlotNum) {
+    motor_checkers_[slot].update();
+  }
+}
+
+bool robot::Robot::isRemoteOnline()
+{
+  return !rc_checker_.isOffline();
+}
+
+bool robot::Robot::areAllMotorsOnline()
+{
+  for (int i = 0; i < kMotorSlotNum; ++i) {
+    if (motor_checkers_[i].isOffline()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Private function definitions ----------------------------------------------*/
 
-/* ============================================================================
- * 【新人任务】实现 robot.hpp 中声明的状态机。
- *
- * 你要做：
- *   1. 周期入口：按「更新数据 → 状态机迁移 → 生成指令 → 下发」的顺序组织 update()。
- *   2. 三态实现：Dead 时输出全零并等待就绪条件；Resurrection 时做自检与复位（如等待
- *      电机使能、IMU 零漂收敛）；Working 时执行正常控制逻辑。
- *   3. 各工作模式（分离 / 随动 / 小陀螺）的指令生成分支。
- *
- * 约束 / 提示：
- *   - 状态切换时记得复位上一状态残留的指令，避免电机突变。
- *   - 所有下发指令统一经过本类，急停判断放在最外层，确保任何分支都先过急停。
- * ==========================================================================*/
+void robot::Robot::updateInput()
+{
+  /* 本地急停：只有「本板确实有遥控器且在线」时才采信它的拨杆，
+   * 否则云台板没接收机时会被误判成一直急停。 */
+  const bool local_estop =
+      (rc_ != nullptr) && isRemoteOnline() &&
+      (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown);
+
+  /* 底盘板下发的急停（底盘板那边已经把自己遥控器的急停算进去了） */
+  const bool peer_estop =
+      (comm_ != nullptr) ? comm_->chassis_data().estop : true;
+
+  estop_ = local_estop || peer_estop;
+}
+
+void robot::Robot::updateStateMachine()
+{
+  const bool comm_ok = (comm_ != nullptr) && !comm_->isOffline();
+  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  const bool motors_ok = areAllMotorsOnline();
+  const bool all_ok = comm_ok && imu_ok && motors_ok;
+
+  const uint32_t now = hello_world::tick::GetTickMs();
+
+  switch (state_) {
+    case LifeState::kDead:
+      if (all_ok) {
+        enterState(LifeState::kResurrection);
+      }
+      break;
+
+    case LifeState::kResurrection:
+      if (!all_ok) {
+        enterState(LifeState::kDead);
+      } else if ((now - state_enter_tick_) >= kResurrectionMs) {
+        enterState(LifeState::kWorking);
+      }
+      break;
+
+    case LifeState::kWorking:
+      if (!all_ok) {
+        enterState(LifeState::kDead);
+      }
+      break;
+
+    default:
+      enterState(LifeState::kDead);
+      break;
+  }
+}
+
+void robot::Robot::enterState(LifeState next)
+{
+  if (next == state_) {
+    return;
+  }
+  state_ = next;
+  state_enter_tick_ = hello_world::tick::GetTickMs();
+
+  /* 离开 Working 就停机；进入 Working 时的目标对齐在 applyOutput 的
+   * 使能上升沿里完成（因为那时才知道「从这一刻开始真的允许出力」）。 */
+  if (next != LifeState::kWorking) {
+    gimbal_->stop();
+    output_enabled_prev_ = false;
+  }
+}
+
+void robot::Robot::applyOutput(float dt)
+{
+  if (state_ != LifeState::kWorking) {
+    gimbal_->stop();
+    output_enabled_prev_ = false;
+    return;
+  }
+
+  /* 急停闸门（最外层） */
+  if (estop_) {
+    gimbal_->stop();
+    output_enabled_prev_ = false;
+    return;
+  }
+
+  /* 底盘板是否允许本板出力。
+   * 注意这里不用 chassis_data().working 单独判断：gimbal_enable 本身
+   * 就是「底盘 Working 且未急停」的组合结果。 */
+  const bool enabled = comm_->chassis_data().gimbal_enable;
+  if (!enabled) {
+    gimbal_->stop();
+    output_enabled_prev_ = false;
+    return;
+  }
+
+  /* ---------- 使能上升沿：把目标对齐到当前实际角度 ---------- */
+  if (!output_enabled_prev_) {
+    yaw_target_world_ = imu_->yaw();          ///< 世界系目标 = 当前朝向
+    gimbal_->setPitchTarget(gimbal_->pitchJoint());  ///< pitch 目标 = 当前角度
+    gimbal_->stop();  ///< 清 PID 积分，避免上一轮的积分突然释放
+    output_enabled_prev_ = true;
+  }
+
+  /* ---------- yaw：积分离散转速设定 ----------
+   * 底盘板下发的是「转多快」（rad/s），这里积分成世界系目标角。
+   * 为什么不直接让它下发角度：世界角只有持有 IMU 的本板才能定义，
+   * 详见 gimbal_chassis_comm.hpp 的说明。 */
+  const float yaw_rate = comm_->chassis_data().yaw_rate;
+  yaw_target_world_ += yaw_rate * dt;
+  gimbal_->setYawWorldTarget(yaw_target_world_);
+
+  /* ---------- pitch：直接采用底盘下发的关节角目标（模块内部再限位） ---------- */
+  gimbal_->setPitchTarget(comm_->chassis_data().pitch_target);
+
+  /* ---------- 闭环 ---------- */
+  gimbal_->update(dt, imu_->yaw());
+}
+
+void robot::Robot::updateCommData()
+{
+  if (comm_ == nullptr) {
+    return;
+  }
+  GimbalChassisComm::GimbalData& d = comm_->gimbal_data();
+  d.working = (state_ == LifeState::kWorking);
+  d.estop = estop_;
+  d.dbus_online = isRemoteOnline();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated();
+  d.pitch_at_limit = gimbal_->pitchAtLimit();
+  d.yaw_joint = gimbal_->yawJoint();
+  d.pitch_joint = gimbal_->pitchJoint();
+}

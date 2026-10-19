@@ -1,12 +1,16 @@
 /**
  *******************************************************************************
  * @file      :ins_comm.cpp
- * @brief     :
+ * @brief     : 遥控器解码对象实例化（云台板）
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成实例化
  *******************************************************************************
  * @attention :
+ *  云台板上的遥控器有两个用途：
+ *    1. 本地急停（响应最快，不必等底盘板的 CAN 帧）；
+ *    2. 万一底盘板挂了，云台也能自己判断「现在该不该出力」。
+ *  但云台「转多少」的指令来自底盘板（C2G 帧），不是这里。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -22,18 +26,8 @@
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 hello_world::remote_control::DT7 *GetRemoteControl() {
-  /* TODO【新人任务】:
-   * 返回遥控器解码对象（DT7）单例。
-   *
-   * 你要做：
-   *   1. 静态定义一个 hello_world::remote_control::DT7 对象并返回其地址。
-   *   2. （可选）如果你自建了其它需要共享的通信对象，也在此暴露访问器。
-   *
-   * 约束 / 提示：
-   *   - DT7 只负责解码 18 字节 DBUS，串口收发在 Task/component/comm_task.cpp 完成。
-   *   - 解码入口：Task/component/comm_task.cpp 的 HAL_UARTEx_RxEventCallback。
-   */
-  return nullptr;
+  static hello_world::remote_control::DT7 s_dt7;
+  return &s_dt7;
 }
 
 /* Private function definitions ----------------------------------------------*/
