@@ -350,6 +350,16 @@ void robot::Robot::updateGimbalCommand()
 
 void robot::Robot::applyOutput()
 {
+  /* ★ 急停闸门：放在最外层 ★
+   * 放在状态判断之前，是因为「恢复自检阶段舵角回中」也是一次真实动作——
+   * 如果只在 Working 分支里判急停，按着急停上电时舵轮仍会自己转回中位。
+   * 现在的顺序保证：只要急停生效，不管什么状态都一步不动。 */
+  if (estop_) {
+    chassis_->stop();
+    gimbal_yaw_rate_ = 0.0f;
+    return;
+  }
+
   if (state_ != LifeState::kWorking) {
     /* 未就绪：自检阶段可以让舵角慢慢回中，其余一律不动 */
     if (state_ == LifeState::kResurrection) {
@@ -357,13 +367,6 @@ void robot::Robot::applyOutput()
     } else {
       chassis_->stop();
     }
-    return;
-  }
-
-  /* ★ 急停闸门：放在这里，保证任何模式、任何指令都绕不过它 ★ */
-  if (estop_) {
-    chassis_->stop();
-    gimbal_yaw_rate_ = 0.0f;
     return;
   }
 
