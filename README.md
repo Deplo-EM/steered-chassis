@@ -1,0 +1,156 @@
+# 舵轮步兵电控（Hello World 电控组考核 · steered_skeleton）
+
+> 一台「4 个驱动轮 + 4 个转向舵电机 + 两轴云台」的舵轮步兵，由两块 STM32F407 分别控制
+> 底盘和云台，通过 CAN 交换信息。本仓库是考核骨架的完整实现。
+>
+> 一句话概括设计：**底盘板当大脑**（读遥控器、决定车怎么走、把云台指令发过去），
+> **云台板当瞄准器**（yaw 用 IMU 做世界系稳定，pitch 做关节限位闭环），
+> **任何一方失联，双方都停车**。
+
+---
+
+## 1. 两块板分别负责什么
+
+| | 底盘板（Chassis） | 云台板（Gimbal） |
+|---|---|---|
+| 执行器 | 4× M3508（驱动轮，CAN1）+ 4× GM6020（转向，CAN2） | 2× 达妙 DM-J4310（yaw / pitch，CAN2） |
+| 传感器 | BMI088 IMU（SPI1） | BMI088 IMU（SPI1） |
+| 遥控器 | USART3 DBUS | USART3 DBUS（可选，用于本地急停） |
+| 算的东西 | 三种模式、云台系→车体系旋转、舵轮逆解、轮速环、舵角环 | yaw 世界角闭环、pitch 关节角闭环 |
+| 发出的帧 | C2G `0x210`（yaw 转速设定 + pitch 目标 + 许可标志） | G2C `0x211`（yaw/pitch 实际关节角 + 状态） |
+
+两块板之间**只有** CAN 帧这一条通路，不共享变量、不互相调用函数。
+
+---
+
+## 2. 快速开始
+
+### 2.1 编译固件
+
+```powershell
+# 底盘板
+cd Chassis
+cmake -S . -B build/verify -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/verify
+
+# 云台板
+cd ../Gimbal
+cmake -S . -B build/verify -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/verify
+```
+
+产物：`Chassis/build/steered_chassis.elf`、`Gimbal/build/steered_gimbal.elf`
+（同目录还有 `.hex` / `.bin`）。
+
+> 为什么用 `build/verify` 而不是 `build/Debug`：骨架包里自带的 `build/Debug` 是在**别的电脑**上
+> 生成的，里面的 CMakeCache 记着旧路径，直接用会报 "CMakeCache.txt directory is different"。
+> 新建一个目录最省事（不要删旧目录，它对你有用）。
+
+### 2.2 跑电脑端单元测试（不需要单片机）
+
+```powershell
+cd steered_skeleton      # 仓库根目录
+./tests/run_tests.ps1
+```
+
+会编译并运行 100+ 项检查，覆盖 PID、双板协议编解码、舵轮逆解、跟随即闭环仿真、角度归一化。
+**改完算法先跑它**——比烧板子快几百倍。
+
+### 2.3 烧录
+
+用 ST-Link / Ozone / CubeProgrammer 烧对应的 `.elf` 即可。
+两块板各烧各的，**顺序无所谓**，但都必须上电且 CAN 互联，否则状态机会停在 Dead。
+
+---
+
+## 3. ⚠️ 上电前必读
+
+1. **遥控器必须先开机**。IWDG 一上电就开始计时（约 200ms），而喂狗条件是「收到有效遥控器数据」。
+   遥控器没开 → 板子每 200ms 复位一次。这是**故意的**（关遥控器 = 车必须停），不是故障。
+   调车确实需要不开遥控器时，把 `Task/component/comm_task.cpp` 里的
+   `kWatchdogFeedEnable` 临时改成 `false`（验收前必须改回来）。
+2. **第一次上车把轮子架空**。方向标定（电机正方向、舵角零点）没做完之前，不要落地。
+3. **急停键位**：右拨杆打到最下面。任何模式下都会立刻把全部电机指令归零。
+4. **IMU 零漂标定需要 2 秒**，期间车必须静止不动（碰一下会自动重新计 2 秒），
+   标定完成前所有电机输出为 0。
+
+---
+
+## 4. 目录结构
+
+```
+steered_skeleton/
+├─ Chassis/                       底盘板
+│  ├─ Core/                       CubeMX 底层（main / can / tim / usart / spi / iwdg）
+│  ├─ inc/ + src/                 组件库 + 你自己写的东西（imu.hpp / pid 等）
+│  ├─ Instance/component/         ★ 实例化层：电机 ID / 方向 / 减速比、IMU 引脚、单例
+│  ├─ RobotModules/component/     ★ 应用层：chassis（逆解+闭环）、robot（状态机+模式）
+│  └─ Task/component/             ★ 任务层：main_task（装配+1ms）、comm_task（DBUS+CAN+喂狗）
+├─ Gimbal/                        云台板（结构与底盘板同构）
+├─ RobotComponents/component/     两板共享：module_state（类型）、gimbal_chassis_comm（协议）、pid
+├─ tests/                         电脑端单元测试（不影响固件编译）
+└─ docs/                          原理讲解 / 调车手册 / 验收对照
+```
+
+标 ★ 的就是考核要求「你自己写」的部分。
+
+---
+
+## 5. 考核任务对照
+
+| # | 考核要求 | 实现位置 |
+|---|---|---|
+| 1 | CAN 接收分发 + 电机配置 | `Chassis/src/HW_can.cpp`、`Gimbal/src/HW_can.cpp`、`Instance/component/ins_motor.cpp` |
+| 2 | UART DBUS 接收（两板） | `Task/component/comm_task.cpp`（`HAL_UARTEx_RxEventCallback`） |
+| 3 | PID 控制器类 | `RobotComponents/component/pid.hpp` |
+| 4 | Imu 封装类 | `Chassis/inc/imu.hpp` + `src/imu.cpp`（云台板同构） |
+| 5 | module_state 共享类型 | `RobotComponents/component/module_state.hpp` |
+| 6 | 舵轮逆解 + 前进方向变换 | `Chassis/RobotModules/component/chassis_ik_solver.*` + `chassis.cpp` |
+| 7 | 云台两轴位置环 | `Gimbal/RobotModules/component/gimbal.cpp` |
+| 8 | 双板通信协议 | `RobotComponents/component/gimbal_chassis_comm.*` |
+| 9 | 状态机 + 任务调度 | `RobotModules/component/robot.cpp`、`Task/component/main_task.cpp` |
+| 10 | IWDG 看门狗 | `comm_task.cpp`（DBUS 处喂狗）+ `Gimbal/src/HW_can.cpp`（解底盘帧处喂狗） |
+| 加分 | 舵轮回摆抑制 | 逆解里的等效解翻转 + 速率限幅 + 「舵角没到位不驱动」 |
+| 加分 | 跟随/小陀螺 | `robot.cpp` 的三模式分支 + 陀螺仪阻尼 |
+| 加分 | 双板互保 | 两板状态机互相把「对方不在线」当停机条件 |
+| 加分 | 小陀螺平移方向不变 | 每 1ms 用最新 δ 旋转指令（仿真用例已验证） |
+
+---
+
+## 6. 三个关键设计取舍
+
+1. **云台 yaw 用「世界系 + 转速设定」，不用「关节角 + 角度目标」**
+   yaw 电机装在底盘和云台之间，只做关节角闭环的话，底盘一转枪口就跟着转，
+   跟随模式永远收敛不了。所以 yaw 必须用云台 IMU 钉住世界方向，而世界角只能由
+   持有 IMU 的云台板自己积分 → 底盘板下发「转多快」。详见 `docs/03`。
+
+2. **云台用「纯力矩 + 自写 PID」，不用达妙内置位置环**
+   达妙 MIT 模式支持位置环（kp/kd），但我们把 kp、kd 都设为 0，只用力矩通道。
+   这样整定逻辑全在自己手里，换电机也不用改控制结构；代价是参数要更保守。
+
+3. **静止时不自动回中舵轮**
+   进入 Working 时保留舵轮当前朝向，而不是「嗖」地转回 0°。
+   少一次不必要的动作，就少一次夹手/扫到东西的机会。
+
+---
+
+## 7. 文档索引
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/00-交付说明与验收对照.md`](docs/00-交付说明与验收对照.md) | 交付清单、自测证据、验收时怎么演示 |
+| [`docs/01-总体架构与坐标系.md`](docs/01-总体架构与坐标系.md) | 数据流、1ms 时序、坐标/符号约定、状态机 |
+| [`docs/02-舵轮运动学逆解.md`](docs/02-舵轮运动学逆解.md) | 从零推导逆解、等效解翻转、限幅 |
+| [`docs/03-双板通信协议.md`](docs/03-双板通信协议.md) | 8 字节帧格式、为什么这么设计、CRC/离线判定 |
+| [`docs/04-控制环路与PID整定.md`](docs/04-控制环路与PID整定.md) | 三个模式、三个环、整定步骤、现象→原因对照表 |
+| [`docs/05-IMU、状态机与安全机制.md`](docs/05-IMU、状态机与安全机制.md) | 零漂标定、三态迁移、五层安全保护 |
+| [`docs/06-调车手册.md`](docs/06-调车手册.md) | 从空车到验收的完整步骤 + 故障排查 |
+
+---
+
+## 8. 说明
+
+- `Drivers/`、`third_party/`（HAL、CMSIS-DSP、Eigen3）体积大，未纳入版本控制，
+  请使用骨架包自带的这两份目录。
+- 所有「待填」的实车参数（电机方向、舵角零点、减速比、几何尺寸、PID 增益）
+  都集中在少数几个文件里，且都有注释标明标定方法，见 `docs/06`。
