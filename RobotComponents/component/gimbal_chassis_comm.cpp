@@ -1,12 +1,16 @@
 /**
  *******************************************************************************
  * @file      :gimbal_chassis_comm.cpp
- * @brief     :
+ * @brief     : 云台板 ↔ 底盘板 CAN 通信协议实现
  * @history   :
  *  Version     Date            Author          Note
- *  V0.9.0      yyyy-mm-dd      <author>        1. <note>
+ *  V1.0.0      2026-10-19      <author>        1. 完成 encode / decode / isOffline
  *******************************************************************************
  * @attention :
+ *  编解码必须严格对称：一端把第 1~2 字节当 yaw 角速度，另一端也必须当成
+ *  yaw 角速度。任何一端写错偏移，对面读到的就是「看起来像正常数值的垃圾」，
+ *  这种 bug 极难排查——所以 tests/ 目录里专门有一个「编码后再解码应还原原值」
+ *  的自测程序，改完协议先跑它。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -14,18 +18,71 @@
  */
 /* Includes ------------------------------------------------------------------*/
 #include "gimbal_chassis_comm.hpp"
+
+#include <cmath>
+
+#include "crc8.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
-/* Private types -------------------------------------------------------------*/
+
+namespace {
+/** 角度缩放：1 LSB = 0.0001 rad（约 0.0057°），int16 可表示 ±3.2767 rad */
+constexpr float kAngleScale = 10000.0f;
+/** yaw 角速度缩放：1 LSB = 0.001 rad/s，int16 可表示 ±32.767 rad/s */
+constexpr float kYawRateScale = 1000.0f;
+
+/** 浮点 → int16，带范围保护。
+ *  注意下界取 -32767 而不是 -32768：避免 +32767 与 -32768 不对称，
+ *  也避免 lroundf 溢出到实现未定义的行为。 */
+inline int16_t FloatToInt16(float value, float scale)
+{
+  float scaled = value * scale;
+  if (scaled > 32767.0f) {
+    scaled = 32767.0f;
+  } else if (scaled < -32767.0f) {
+    scaled = -32767.0f;
+  }
+  return static_cast<int16_t>(std::lroundf(scaled));
+}
+
+/** int16 → 浮点（与 FloatToInt16 互为逆运算） */
+inline float Int16ToFloat(int16_t value, float scale)
+{
+  return static_cast<float>(value) / scale;
+}
+
+/** 大端写入 16 位整数（CAN 帧字节序由我们自己约定，这里统一用大端） */
+inline void WriteInt16(uint8_t* data, int offset, int16_t value)
+{
+  const uint16_t raw = static_cast<uint16_t>(value);
+  data[offset] = static_cast<uint8_t>(raw >> 8);
+  data[offset + 1] = static_cast<uint8_t>(raw & 0xFFu);
+}
+
+/** 大端读取 16 位整数 */
+inline int16_t ReadInt16(const uint8_t* data, int offset)
+{
+  const uint16_t raw =
+      static_cast<uint16_t>((static_cast<uint16_t>(data[offset]) << 8) |
+                            static_cast<uint16_t>(data[offset + 1]));
+  return static_cast<int16_t>(raw);
+}
+
+/** 计算前 7 字节的 CRC8（多项式 0x07，初值 0），放在第 8 字节 */
+inline uint8_t CalcCrc(const uint8_t* data)
+{
+  hello_world::tools::crc8_check crc;
+  return crc.getCrc8CheckNum(data, 7u, 0u);
+}
+
+}  // namespace
+
 /* Private variables ---------------------------------------------------------*/
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 robot::GimbalChassisComm::GimbalChassisComm(robot::GimbalChassisComm::CodePart code_part,
                                             uint32_t tx_id, uint32_t rx_id) {
-  /* TODO【新人任务】:
-   * 保存 code_part / tx_id / rx_id，并把 last_rx_tick_ 初始化为当前 GetTickMs()。
-   */
   code_part_ = code_part;
   tx_id_ = tx_id;
   rx_id_ = rx_id;
@@ -33,30 +90,100 @@ robot::GimbalChassisComm::GimbalChassisComm(robot::GimbalChassisComm::CodePart c
 }
 
 void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
-  /* TODO【新人任务】:
-   * 编码己方帧：把本地 ChassisData / GimbalData 按 hpp 里定的字段布局打包进 8 字节。
-   *   - 由 code_part_ 决定打包哪个方向（Chassis → ChassisData，Gimbal → GimbalData）。
-   *   - 浮点量按约定比例缩放成整数，避免丢位；收发两端比例必须一致。
-   *   - 打包完成后由 Task/component/comm_task.cpp 用 tx_id_ 发送。
-   */
-  (void)tx_data;
+  /* 先整体清零：保留字节固定填 0，避免把栈上的随机值发出去 */
+  for (uint8_t i = 0; i < kCommFrameLen; ++i) {
+    tx_data[i] = 0;
+  }
+
+  if (code_part_ == CodePart::Chassis) {
+    /* ---------------------------- 底盘 → 云台 ---------------------------- */
+    ChassisData& d = chassis_data_;
+    d.alive = true;  /* 能执行到 encode，说明本板活着 */
+
+    uint8_t flags = 0;
+    if (d.alive) flags |= (1u << 0);
+    if (d.working) flags |= (1u << 1);
+    if (d.estop) flags |= (1u << 2);
+    if (d.dbus_online) flags |= (1u << 3);
+    flags |= (static_cast<uint8_t>(d.mode) & 0x03u) << 4;
+    if (d.imu_ready) flags |= (1u << 6);
+    if (d.gimbal_enable) flags |= (1u << 7);
+    tx_data[0] = flags;
+
+    WriteInt16(tx_data, 1, FloatToInt16(d.yaw_rate, kYawRateScale));
+    WriteInt16(tx_data, 3, FloatToInt16(d.pitch_target, kAngleScale));
+  } else {
+    /* ---------------------------- 云台 → 底盘 ---------------------------- */
+    GimbalData& d = gimbal_data_;
+    d.alive = true;
+
+    uint8_t flags = 0;
+    if (d.alive) flags |= (1u << 0);
+    if (d.working) flags |= (1u << 1);
+    if (d.estop) flags |= (1u << 2);
+    if (d.dbus_online) flags |= (1u << 3);
+    if (d.imu_ready) flags |= (1u << 4);
+    if (d.pitch_at_limit) flags |= (1u << 5);
+    tx_data[0] = flags;
+
+    WriteInt16(tx_data, 1, FloatToInt16(d.yaw_joint, kAngleScale));
+    WriteInt16(tx_data, 3, FloatToInt16(d.pitch_joint, kAngleScale));
+  }
+
+  tx_data[5] = 0;  /* 保留字节 */
+  tx_data[6] = tx_seq_++;
+  tx_data[7] = CalcCrc(tx_data);
 }
 
 void robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
-  /* TODO【新人任务】:
-   * 解码对方帧：把 8 字节按同样布局还原成对方语义，更新本地缓存，并刷新 last_rx_tick_。
-   *   - 严格与 encode() 对称；任何一端偏移写错都会让对面读到错乱数据。
-   *   - 建议先写自测：同一结构 encode 后再 decode 应能还原原值。
-   */
-  (void)rx_data;
+  /* ---- 第一步：校验 ----
+   * CRC 不对就整帧丢弃，并且不刷新 last_rx_tick_（等于当成没收到）。
+   * 这样即使总线上有干扰，也不会把垃圾数据当成有效指令去驱动电机。 */
+  if (rx_data[7] != CalcCrc(rx_data)) {
+    return;
+  }
+
+  const uint8_t flags = rx_data[0];
+
+  if (code_part_ == CodePart::Chassis) {
+    /* 底盘板收到的是云台的 G2C 帧 */
+    GimbalData& d = gimbal_data_;
+    d.alive = (flags & (1u << 0)) != 0;
+    d.working = (flags & (1u << 1)) != 0;
+    d.estop = (flags & (1u << 2)) != 0;
+    d.dbus_online = (flags & (1u << 3)) != 0;
+    d.imu_ready = (flags & (1u << 4)) != 0;
+    d.pitch_at_limit = (flags & (1u << 5)) != 0;
+
+    d.yaw_joint = Int16ToFloat(ReadInt16(rx_data, 1), kAngleScale);
+    d.pitch_joint = Int16ToFloat(ReadInt16(rx_data, 3), kAngleScale);
+  } else {
+    /* 云台板收到的是底盘的 C2G 帧 */
+    ChassisData& d = chassis_data_;
+    d.alive = (flags & (1u << 0)) != 0;
+    d.working = (flags & (1u << 1)) != 0;
+    d.estop = (flags & (1u << 2)) != 0;
+    d.dbus_online = (flags & (1u << 3)) != 0;
+    d.mode = static_cast<ChassisMode>((flags >> 4) & 0x03u);
+    d.imu_ready = (flags & (1u << 6)) != 0;
+    d.gimbal_enable = (flags & (1u << 7)) != 0;
+
+    d.yaw_rate = Int16ToFloat(ReadInt16(rx_data, 1), kYawRateScale);
+    d.pitch_target = Int16ToFloat(ReadInt16(rx_data, 3), kAngleScale);
+  }
+
+  /* 只有校验通过、字段解析完成，才认为「对方还活着」 */
+  last_rx_tick_ = hello_world::tick::GetTickMs();
+  received_ = true;
 }
 
 bool robot::GimbalChassisComm::isOffline() const {
-  /* TODO【新人任务】:
-   * 用 GetTickMs() 与 last_rx_tick_ 的差值判断对方是否离线（超过阈值即离线）。
-   * 阈值可自定义（如 100ms），供状态机 / 看门狗判断对方是否还活着。
-   */
-  return false;
+  if (!received_) {
+    return true;  /* 上电后一帧都没收到，当然算离线 */
+  }
+  /* 无符号减法：即使 GetTickMs 回绕（约 49.7 天一次）结果也正确 */
+  const uint32_t elapsed = hello_world::tick::GetTickMs() - last_rx_tick_;
+  return elapsed > kCommOfflineThresholdMs;
 }
 
 /* Private function definitions ----------------------------------------------*/
