@@ -60,15 +60,26 @@ enum class FaultId : uint32_t {
 /* Exported variables --------------------------------------------------------*/
 
 /** 当前注入的故障编号（volatile：调试器直接改写即可生效，无需重烧）
- *  @note 用 __attribute__((used)) 强制保留在 ELF 里：即使总开关关闭、
- *        编译器把所有引用都优化掉，这个符号也必须存在，否则
- *        "烧回的固件是不是安全版"就没法用符号/调试器核实（复核意见 1）。 */
+ *  @note 靠"volatile + 启动时写一次"保留在 ELF 里（详见 .cpp 的说明）。
+ *        仅凭符号存在**不能**判断开关状态，判断方法见下。 */
 extern volatile uint32_t g_fault_id;
 
 /** 本固件是否带故障注入能力：`false` 表示安全固件。
- *  @note 同样强制保留在 ELF 里。外部链接 + used，保证关闭注入时也能被
- *        调试器和 `nm` 读到——这是"已烧回安全固件"的**可核实证据**。 */
+ *  @note 运行期值，只能在调试器里读。
+ *        想**离线**核对"这个 .elf 是安全版吗"，请用下面的 g_build_tag。 */
 extern volatile bool g_fault_injection_enabled;
+
+/**
+ * @brief 构建标签：`"SAFE-BUILD"` 或 `"FAULT-INJECTION-BUILD"`
+ * @note  它是 .rodata 里的字符串，可以直接在固件文件上查：
+ *          arm-none-eabi-strings 固件.elf | findstr BUILD
+ *        安全固件只应出现 `SAFE-BUILD`。
+ *        这是"已烧回安全固件"的**离线证据**（不依赖调试器，也不依赖符号表）。
+ */
+extern const char* const g_build_tag;
+
+/** 构建标签地址（启动时写入；用于保证标签字符串不被链接器回收，也方便调试器查看） */
+extern const char* volatile g_build_tag_addr;
 
 /* Exported function prototypes ----------------------------------------------*/
 

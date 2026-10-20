@@ -16,12 +16,12 @@
 #include "fault_injection.hpp"
 
 /* Private macro -------------------------------------------------------------*/
-#if defined(__GNUC__) && (__GNUC__ >= 11)
-/** retain：在 ELF 段上打 SHF_GNU_RETAIN 标记，让**链接器**的 --gc-sections 也保留它。
- *  （只用 used 只能让编译器保留；本工程的链接参数带 -Wl,--gc-sections，
- *    没有 retain 时符号仍会被丢掉——复核意见 1 的根因。） */
-#define HW_KEEP_SYMBOL __attribute__((used, retain))
-#elif defined(__GNUC__)
+#if defined(__GNUC__)
+/** used：让编译器即使发现"没人引用"也把符号放进目标文件。
+ *  @note 只靠它**不够**——真正保住符号的是「volatile 变量 + 启动时写一次」。
+ *        （曾尝试 __attribute__((retain)) 想让链接器 --gc-sections 也保留，
+ *         但本工具链下该属性被忽略，编译会报 'retain' attribute ignored，
+ *         所以已移除，见复核意见。） */
 #define HW_KEEP_SYMBOL __attribute__((used))
 #else
 #define HW_KEEP_SYMBOL
@@ -36,9 +36,7 @@ namespace robot {
  * 的引用全部删掉；再叠加链接器的 --gc-sections，符号就整个消失，
  * "文档让你去调试器里看，但变量根本不存在"——复核意见 1 说的正是这个。
  *
- * 实测：单靠 __attribute__((used)) 不够（只管编译器），
- *       __attribute__((retain)) 在本工程的链接脚本下也没留住。
- * 因此最终方案 = volatile 变量 + 在 MainTaskInit() 里做一次 volatile 写。
+ * 最终方案 = volatile 变量 + 在 MainTaskInit() 里做一次 volatile 写。
  * volatile 访问是编译器不能消除的副作用，符号必然保留；同时启动时把
  * g_fault_id 归零，也顺便保证"上电默认不注入"。 */
 HW_KEEP_SYMBOL volatile uint32_t g_fault_id =
@@ -48,5 +46,25 @@ HW_KEEP_SYMBOL volatile uint32_t g_fault_id =
  *  volatile 是为了让它不被优化/回收；运行期不会有人改它。 */
 HW_KEEP_SYMBOL volatile bool g_fault_injection_enabled =
     kEnableFaultInjection;
+
+/* ---------------------------------------------------------------------------
+ * 构建标签：**离线**区分两种固件的证据
+ *
+ * 为什么需要它：`nm` 只能证明符号存在——带注入的固件也有同样的两个符号，
+ * 所以 nm **不能**用来判断开关是 true 还是 false（复核意见）。
+ * 而 g_fault_injection_enabled 的值是启动时写进 .bss 的，ELF 文件里也读不到。
+ *
+ * 于是把两种构建编成两段不同的字符串放进 .rodata：
+ *     SAFE-BUILD                ← 安全固件
+ *     FAULT-INJECTION-BUILD     ← 带注入的固件
+ * 刷机前后都可以用 strings 直接在 .elf 上核对，不用连板子。
+ * ------------------------------------------------------------------------- */
+HW_KEEP_SYMBOL const char* const g_build_tag =
+    kEnableFaultInjection ? "FAULT-INJECTION-BUILD" : "SAFE-BUILD";
+
+/** 构建标签的地址（启动时写入）。
+ *  作用有两个：① 让上面的字符串真的被引用，不会被链接器回收；
+ *             ② 调试器里能直接看到它指向哪段文字。 */
+HW_KEEP_SYMBOL const char* volatile g_build_tag_addr = nullptr;
 
 }  // namespace robot

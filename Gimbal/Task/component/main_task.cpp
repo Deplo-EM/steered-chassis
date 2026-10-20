@@ -56,6 +56,10 @@ void MainTaskInit(void) {
   robot::g_fault_id = static_cast<uint32_t>(robot::FaultId::kNone);
   robot::g_fault_injection_enabled = robot::kEnableFaultInjection;
 
+  /* 保存构建标签地址：保证字符串留在 .rodata 里，
+   * 可用 strings 在固件文件上离线核对是不是安全版。 */
+  robot::g_build_tag_addr = robot::g_build_tag;
+
   /* ---------- 1. 两个达妙电机 ---------- */
   hello_world::motor::Motor* yaw_motor = GetMotorYaw();
   hello_world::motor::Motor* pitch_motor = GetMotorPitch();
