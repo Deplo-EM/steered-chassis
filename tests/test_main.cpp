@@ -22,6 +22,7 @@
 #include <cstring>
 
 #include "chassis_ik_solver.hpp"
+#include "DT7.hpp"
 #include "dbus_check.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "module_state.hpp"
@@ -383,6 +384,35 @@ void TestDbusCheck()
 
     SetDbusChannel(frame, 4, 200);  // 低于下界
     EXPECT_TRUE(!IsDbusFrameValid(frame));
+  }
+
+  /* ---- 审计 F1 的正面对拍：校验器与解码器必须对同一帧给出矛盾结论 ---- */
+  BeginCase("DBUS 校验与 DT7 解码对拍：0xFC00 拨轮帧必须被拒绝");
+  {
+    hello_world::remote_control::DT7 rc;
+
+    /* 1) 先证明"如果放行"会出什么事：DT7 解出来的拨轮值远超声明的 [-1,1] */
+    MakeValidDbusFrame(frame);
+    SetDbusChannel(frame, 4, 0xFC00);
+    rc.decode(frame);
+    EXPECT_TRUE(std::fabs(rc.rc_wheel()) > 10.0f);
+    /* 2) 所以校验器必须拒绝它 —— 这就是 F1 要求的"同一宽度" */
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+
+    /* 3) 正常帧：解码值在 [-1,1]，校验通过 */
+    MakeValidDbusFrame(frame);
+    rc.decode(frame);
+    EXPECT_NEAR(rc.rc_wheel(), 0.0f, 1e-3f);
+    EXPECT_NEAR(rc.rc_lv(), 0.0f, 1e-3f);
+    EXPECT_NEAR(rc.rc_lh(), 0.0f, 1e-3f);
+    EXPECT_TRUE(IsDbusFrameValid(frame));
+
+    /* 4) 摇杆打到满量程：解码值应正好 ±1，校验仍通过 */
+    MakeValidDbusFrame(frame);
+    SetDbusChannel(frame, 3, 1684);  // 左摇杆竖直最大
+    rc.decode(frame);
+    EXPECT_NEAR(rc.rc_lv(), 1.0f, 1e-3f);
+    EXPECT_TRUE(IsDbusFrameValid(frame));
   }
 }
 

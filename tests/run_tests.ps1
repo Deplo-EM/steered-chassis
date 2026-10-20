@@ -22,11 +22,13 @@ if (-not $gxx) {
 }
 
 # 需要参与编译的源文件（都是纯算法，不含 HAL）
+# DT7.cpp 也编进来：让「校验器」和「解码器」在同一组用例里对拍（审计 F1）
 $sources = @(
     (Join-Path $PSScriptRoot "test_main.cpp"),
     (Join-Path $PSScriptRoot "stub_tick.cpp"),
     (Join-Path $repoRoot "RobotComponents\component\gimbal_chassis_comm.cpp"),
-    (Join-Path $repoRoot "Chassis\RobotModules\component\chassis_ik_solver.cpp")
+    (Join-Path $repoRoot "Chassis\RobotModules\component\chassis_ik_solver.cpp"),
+    (Join-Path $repoRoot "Chassis\src\DT7.cpp")
 )
 
 # 头文件搜索路径
