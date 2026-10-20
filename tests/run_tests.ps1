@@ -1,4 +1,4 @@
-# 编译并运行电脑端单元测试（不需要单片机）
+﻿# 编译并运行电脑端单元测试（不需要单片机）
 #
 # 用法（在仓库根目录 steered_skeleton/ 下执行）：
 #   powershell -ExecutionPolicy Bypass -File tests/run_tests.ps1

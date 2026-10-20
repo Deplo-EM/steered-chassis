@@ -60,6 +60,13 @@ void MainTaskInit(void) {
   g_reset_by_iwdg = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET);
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
+  /* ---------- 0.5 故障注入状态自检 ----------
+   * 这里是**volatile 写**：编译器不能删除，链接器也就不会把这两个符号回收。
+   * 保证任何构建里都能用调试器 / 符号表核实「烧的是不是安全固件」。
+   * 同时把 g_fault_id 归零 = 上电默认不注入。 */
+  robot::g_fault_id = static_cast<uint32_t>(robot::FaultId::kNone);
+  robot::g_fault_injection_enabled = robot::kEnableFaultInjection;
+
   /* ---------- 1. 电机：构造并配置 ID / 方向 / 减速比 ---------- */
   for (int i = 0; i < 4; ++i) {
     (void)GetMotorWheel(i);

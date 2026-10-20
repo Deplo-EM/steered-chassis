@@ -59,11 +59,16 @@ enum class FaultId : uint32_t {
 
 /* Exported variables --------------------------------------------------------*/
 
-/** 当前注入的故障编号（volatile：调试器直接改写即可生效，无需重烧） */
+/** 当前注入的故障编号（volatile：调试器直接改写即可生效，无需重烧）
+ *  @note 用 __attribute__((used)) 强制保留在 ELF 里：即使总开关关闭、
+ *        编译器把所有引用都优化掉，这个符号也必须存在，否则
+ *        "烧回的固件是不是安全版"就没法用符号/调试器核实（复核意见 1）。 */
 extern volatile uint32_t g_fault_id;
 
-/** 本固件是否带故障注入能力（调试器里一眼能看出来，防止误烧上车） */
-extern const bool g_fault_injection_enabled;
+/** 本固件是否带故障注入能力：`false` 表示安全固件。
+ *  @note 同样强制保留在 ELF 里。外部链接 + used，保证关闭注入时也能被
+ *        调试器和 `nm` 读到——这是"已烧回安全固件"的**可核实证据**。 */
+extern volatile bool g_fault_injection_enabled;
 
 /* Exported function prototypes ----------------------------------------------*/
 

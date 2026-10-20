@@ -50,6 +50,12 @@ void MainTaskInit(void) {
   g_reset_by_iwdg = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET);
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
+  /* ---------- 0.5 故障注入状态自检 ----------
+   * volatile 写：编译器不能删除，链接器不会回收符号，
+   * 保证任何构建里都能核实「烧的是不是安全固件」；同时把注入项归零。 */
+  robot::g_fault_id = static_cast<uint32_t>(robot::FaultId::kNone);
+  robot::g_fault_injection_enabled = robot::kEnableFaultInjection;
+
   /* ---------- 1. 两个达妙电机 ---------- */
   hello_world::motor::Motor* yaw_motor = GetMotorYaw();
   hello_world::motor::Motor* pitch_motor = GetMotorPitch();
