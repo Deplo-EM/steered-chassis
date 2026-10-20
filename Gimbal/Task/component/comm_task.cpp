@@ -148,11 +148,11 @@ void CommTask(void)
     }
   }
 
-  /* ---------- 3. 看门狗：整个周期都跑完了才喂 ---------- */
-  if (kDebugAlwaysFeedWatchdog) {
-    /* 调试模式：无条件喂（仅台架，绝不上车） */
-    HAL_IWDG_Refresh(&hiwdg);
-  } else if (RemoteAliveForWatchdog()) {
+  /* ---------- 3. 看门狗：整个周期都跑完了才喂 ----------
+   * 全板**只有这一个**喂狗调用点。 */
+  const bool should_feed =
+      kDebugAlwaysFeedWatchdog /* 仅台架调试用 */ || RemoteAliveForWatchdog();
+  if (should_feed) {
     HAL_IWDG_Refresh(&hiwdg);
   }
 }

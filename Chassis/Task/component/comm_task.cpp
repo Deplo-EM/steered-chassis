@@ -186,11 +186,11 @@ void CommTask(void)
 
   /* ---------- 4. 看门狗：整个周期都跑完了才喂 ----------
    * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
-   * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。 */
-  if (kDebugAlwaysFeedWatchdog) {
-    /* 调试模式：无条件喂（仅台架，绝不上车） */
-    HAL_IWDG_Refresh(&hiwdg);
-  } else if (RemoteAliveForWatchdog()) {
+   * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。
+   * 全板**只有这一个**喂狗调用点。 */
+  const bool should_feed =
+      kDebugAlwaysFeedWatchdog /* 仅台架调试用 */ || RemoteAliveForWatchdog();
+  if (should_feed) {
     HAL_IWDG_Refresh(&hiwdg);
   }
 }
