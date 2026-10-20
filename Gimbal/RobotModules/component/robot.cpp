@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "DT7.hpp"
+#include "fault_injection.hpp"
 #include "gimbal.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
@@ -71,8 +72,10 @@ void robot::Robot::update()
     return;
   }
 
-  /* 1. 传感器 */
-  imu_->update();
+  /* 1. 传感器（故障注入 kImuFrozen 时跳过采样，见 docs/08） */
+  if (!robot::FaultActive(robot::FaultId::kImuFrozen)) {
+    imu_->update();
+  }
 
   /* 2. 输入（急停判据） */
   updateInput();

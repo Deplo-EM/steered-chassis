@@ -41,6 +41,7 @@
 #include "HW_can.hpp"
 #include "can.h"
 #include "dbus_check.hpp"
+#include "fault_injection.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "ins_all.hpp"
 #include "iwdg.h"
@@ -135,6 +136,16 @@ void CommTaskInit(void)
 
 void CommTask(void)
 {
+  /* ---------- 故障注入：占满 CAN 发送邮箱 ----------
+   * 连发 3 帧把 3 个邮箱占满，本周期真正的控制帧就会发送失败，
+   * s_can_tx_fail_count 会增长。用来验证审计 H4 的"发送失败可检测"。 */
+  if (robot::FaultActive(robot::FaultId::kCanTxStarve)) {
+    static uint8_t dummy[8] = {0};
+    for (int i = 0; i < 3; ++i) {
+      (void)CAN_Send_Msg(&hcan1, dummy, 0x7F0u, 8);
+    }
+  }
+
   /* ---------- 1. 下发驱动电机（4 台共用 0x200） ----------
    * encode() 只会往缓冲区里「自己那 2 个字节」写数据（索引 = (id-1)%4），
    * 所以 4 台电机依次编码到同一块缓冲区，最后发一帧即可。 */
@@ -206,6 +217,16 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
   if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
+    /* ---------- 故障注入：把拨轮两个字节改成 0xFC00 ----------
+     * 低 11 位仍是 1024（正常中位），高 5 位是脏的。
+     * 期望：校验不通过 → 不解码、不刷新在线时间 → 100ms 后回 Dead，
+     *       并且看门狗在 200ms 左右复位（因为没喂狗）。
+     * 这项专门验证审计 F1：校验器与解码器位宽不一致时会被绕过。 */
+    if (robot::FaultActive(robot::FaultId::kInvalidDbusWheel)) {
+      s_dbus_buf[16] = 0x00;
+      s_dbus_buf[17] = 0xFC;
+    }
+
     /* 先校验，再解码。非法帧一律当作「没收到」。 */
     if (robot::IsDbusFrameValid(s_dbus_buf)) {
       hello_world::remote_control::DT7* rc = GetRemoteControl();
@@ -218,9 +239,9 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
       }
       s_last_valid_dbus_tick = hello_world::tick::GetTickMs();
       s_dbus_received = true;
-      ++s_dbus_valid_frames;
+      s_dbus_valid_frames = s_dbus_valid_frames + 1u;
     } else {
-      ++s_dbus_invalid_frames;
+      s_dbus_invalid_frames = s_dbus_invalid_frames + 1u;
     }
   }
 

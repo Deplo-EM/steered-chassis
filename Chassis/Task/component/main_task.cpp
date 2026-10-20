@@ -26,6 +26,8 @@
 
 #include "chassis.hpp"
 #include "comm_task.hpp"
+#include "diagnostics.hpp"
+#include "fault_injection.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "ins_all.hpp"
@@ -99,6 +101,15 @@ void MainTaskInit(void) {
 }
 
 void MainTask(void) {
+  /* ---------- 故障注入：模拟「控制任务卡死」 ----------
+   * 注意这里**故意不关中断**：UART/CAN 中断还会继续跑。
+   * 这正是审计 H1 描述的场景——如果喂狗写在中断里，板子就不会复位；
+   * 现在喂狗只在 CommTask 末尾，所以这里死循环 → 200ms 后必然复位。 */
+  if (robot::FaultActive(robot::FaultId::kHangControlLoop)) {
+    while (true) {
+    }
+  }
+
   robot::Robot* robot = GetRobot();
   if (robot != nullptr) {
     robot->update();
@@ -111,11 +122,19 @@ void MainTask(void) {
  * @brief 定时器周期中断回调：整个系统的 1ms 心跳
  * @note  1. 必须 extern "C"（HAL 是 C 链接）；
  *        2. 必须先判断中断源是 TIM6——TIM2 也在跑，别把别的定时器当成控制节拍；
- *        3. 顺序是「先控制、后通信」：本周期算出来的指令，同一周期就发出去。
+ *        3. 顺序是「先控制、后通信」：本周期算出来的指令，同一周期就发出去；
+ *        4. 顺便用 TIM2 量一下这一整轮花了多少 tick（84 tick = 1us），
+ *           结果放在 robot::diag::g_cpu 里，验收时读它证明没有超时。
  */
 extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   if (htim->Instance == TIM6) {
+    const uint32_t start_ticks = __HAL_TIM_GET_COUNTER(&htim2);
+
     MainTask();
     CommTask();
+
+    const uint32_t elapsed_ticks = __HAL_TIM_GET_COUNTER(&htim2) - start_ticks;
+    /* 预算：1ms @ 84MHz = 84000 tick */
+    robot::diag::RecordCycle(elapsed_ticks, 84000u);
   }
 }

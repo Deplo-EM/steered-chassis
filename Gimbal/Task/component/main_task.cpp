@@ -18,6 +18,8 @@
 #include "main_task.hpp"
 
 #include "comm_task.hpp"
+#include "diagnostics.hpp"
+#include "fault_injection.hpp"
 #include "gimbal.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
@@ -76,6 +78,13 @@ void MainTaskInit(void) {
 }
 
 void MainTask(void) {
+  /* ---------- 故障注入：模拟「控制任务卡死」（详见 docs/08） ----------
+   * 故意不关中断，用来证明喂狗确实只发生在控制周期末尾。 */
+  if (robot::FaultActive(robot::FaultId::kHangControlLoop)) {
+    while (true) {
+    }
+  }
+
   robot::Robot* robot = GetRobot();
   if (robot != nullptr) {
     robot->update();
@@ -86,11 +95,19 @@ void MainTask(void) {
 
 /**
  * @brief 定时器周期中断回调：1ms 心跳
- * @note  必须 extern "C"，且先确认中断源是 TIM6。
+ * @note  必须 extern "C"，且先确认中断源是 TIM6；
+ *        顺便用 TIM2 量这一整轮的耗时（84 tick = 1us），结果在
+ *        robot::diag::g_cpu 里，验收时读它证明没有超时。
  */
 extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim) {
   if (htim->Instance == TIM6) {
+    const uint32_t start_ticks = __HAL_TIM_GET_COUNTER(&htim2);
+
     MainTask();
     CommTask();
+
+    const uint32_t elapsed_ticks = __HAL_TIM_GET_COUNTER(&htim2) - start_ticks;
+    /* 预算：1ms @ 84MHz = 84000 tick */
+    robot::diag::RecordCycle(elapsed_ticks, 84000u);
   }
 }

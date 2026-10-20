@@ -27,6 +27,7 @@
 
 #include "DT7.hpp"
 #include "chassis.hpp"
+#include "fault_injection.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "tick.hpp"
@@ -127,8 +128,13 @@ void robot::Robot::update()
     return;
   }
 
-  /* ---- 1. 更新传感器（IMU 必须每个周期都读，标定期间也要读） ---- */
-  imu_->update();
+  /* ---- 1. 更新传感器（IMU 必须每个周期都读，标定期间也要读） ----
+   * 故障注入 kImuFrozen：跳过采样，让数据停在上一帧。
+   * 这是为了**如实演示**审计 F3 的残留风险：读数冻结在"物理上合理的旧值"时，
+   * 本层的数值检查发现不了（isHealthy 仍然是 true）。 */
+  if (!robot::FaultActive(robot::FaultId::kImuFrozen)) {
+    imu_->update();
+  }
 
   /* ---- 2. 读遥控器状态 ---- */
   updateInput();

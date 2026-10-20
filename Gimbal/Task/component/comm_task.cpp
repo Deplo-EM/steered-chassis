@@ -35,6 +35,7 @@
 #include "HW_can.hpp"
 #include "can.h"
 #include "dbus_check.hpp"
+#include "fault_injection.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "ins_all.hpp"
 #include "iwdg.h"
@@ -131,6 +132,13 @@ void CommTaskInit(void)
 
 void CommTask(void)
 {
+  /* ---------- 故障注入：占满 CAN2 发送邮箱（达妙在 CAN2） ---------- */
+  if (robot::FaultActive(robot::FaultId::kCanTxStarve)) {
+    static uint8_t dummy[8] = {0};
+    for (int i = 0; i < 3; ++i) {
+      (void)CAN_Send_Msg(&hcan2, dummy, 0x7F1u, 8);
+    }
+  }
   /* ---------- 1. 两个达妙电机：各自一帧，ID 不同，不能合并 ---------- */
   if (!SendDamiaoFrame(GetMotorYaw(), s_yaw_frame)) {
     ++s_can_tx_fail_count;
@@ -168,6 +176,13 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
   if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
+    /* ---------- 故障注入：把拨轮两个字节改成 0xFC00 ----------
+     * 期望：校验不通过 → 不解码、不刷新在线时间（详见 docs/08）。 */
+    if (robot::FaultActive(robot::FaultId::kInvalidDbusWheel)) {
+      s_dbus_buf[16] = 0x00;
+      s_dbus_buf[17] = 0xFC;
+    }
+
     if (robot::IsDbusFrameValid(s_dbus_buf)) {
       hello_world::remote_control::DT7* rc = GetRemoteControl();
       if (rc != nullptr) {
@@ -179,9 +194,9 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
       }
       s_last_valid_dbus_tick = hello_world::tick::GetTickMs();
       s_dbus_received = true;
-      ++s_dbus_valid_frames;
+      s_dbus_valid_frames = s_dbus_valid_frames + 1u;
     } else {
-      ++s_dbus_invalid_frames;
+      s_dbus_invalid_frames = s_dbus_invalid_frames + 1u;
     }
   }
 
