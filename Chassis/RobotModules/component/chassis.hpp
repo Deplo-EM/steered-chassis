@@ -83,12 +83,6 @@ class Chassis {
    */
   void stop();
 
-  /**
-   * @brief 舵角回中（恢复自检阶段用）：轮子不出力，只把 4 个舵角缓慢转回 0
-   * @param dt 控制周期，单位 s
-   */
-  void centerSteer(float dt);
-
   /* 状态查询 */
   bool isReady() const { return ready_; }
   const ChassisMotion& motion() const { return motion_; }         ///< 云台系指令

@@ -205,7 +205,9 @@ bool robot::Robot::readEstopSwitch() const
 void robot::Robot::updateStateMachine()
 {
   const bool remote_ok = isRemoteOnline();
-  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
+  const bool imu_ok =
+      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
   const bool motors_ok = areAllMotorsOnline();
   /* 对方在线且已经进入 Working：云台没准备好就不许开车（枪口会乱晃） */
   const bool peer_ok =
@@ -361,12 +363,12 @@ void robot::Robot::applyOutput()
   }
 
   if (state_ != LifeState::kWorking) {
-    /* 未就绪：自检阶段可以让舵角慢慢回中，其余一律不动 */
-    if (state_ == LifeState::kResurrection) {
-      chassis_->centerSteer(kDt);
-    } else {
-      chassis_->stop();
-    }
+    /* 审计 H3 修复：考核红线是「生命状态未进入 Working 时，所有电机必须
+     * 立刻输出归零」。所以这里一律 stop()，不再做「恢复自检阶段舵轮回中」。
+     * 回中虽然好看，但它是「无人下达的运动指令」，按红线判会不通过。
+     * 需要这个功能的话，必须在考核方书面确认后，再做成「受遥控器确认、
+     * 限速、且急停可打断」的流程。 */
+    chassis_->stop();
     return;
   }
 
@@ -386,7 +388,7 @@ void robot::Robot::updateCommData()
   d.working = (state_ == LifeState::kWorking);
   d.estop = estop_;
   d.dbus_online = isRemoteOnline();
-  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
   d.gimbal_enable = d.working && !estop_;
   d.mode = mode_;
   d.yaw_rate = d.gimbal_enable ? gimbal_yaw_rate_ : 0.0f;

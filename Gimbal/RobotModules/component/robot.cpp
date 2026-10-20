@@ -134,7 +134,9 @@ void robot::Robot::updateInput()
 void robot::Robot::updateStateMachine()
 {
   const bool comm_ok = (comm_ != nullptr) && !comm_->isOffline();
-  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
+  const bool imu_ok =
+      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
   const bool motors_ok = areAllMotorsOnline();
   const bool all_ok = comm_ok && imu_ok && motors_ok;
 
@@ -240,7 +242,7 @@ void robot::Robot::updateCommData()
   d.working = (state_ == LifeState::kWorking);
   d.estop = estop_;
   d.dbus_online = isRemoteOnline();
-  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
   d.pitch_at_limit = gimbal_->pitchAtLimit();
   d.yaw_joint = gimbal_->yawJoint();
   d.pitch_joint = gimbal_->pitchJoint();

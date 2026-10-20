@@ -57,6 +57,11 @@ void hello_world::imu::Imu::update()
   /* ---------- 1. 读芯片 ---------- */
   bmi_.getData(acc_, gyro_bias_removed_, &temperature_);
 
+  /* ---------- 1.5 运行期健康检查（审计 M3） ----------
+   * 初始化成功不代表运行中一直正常。SPI 接触不良时读回来的可能是全 0、
+   * 全 0xFF 或 NaN，这里统一判掉，交给状态机回 Dead。 */
+  updateHealth();
+
   /* ---------- 2. 零漂标定 ---------- */
   if (!calibrated_) {
     /* 先判断「是否静止」：与当前均值偏差过大 → 车在动，重新采样。
@@ -105,3 +110,55 @@ void hello_world::imu::Imu::update()
 }
 
 /* Private function definitions ----------------------------------------------*/
+
+void hello_world::imu::Imu::updateHealth()
+{
+  /* 判据（都要满足才认为数据可信）：
+   *   1. 所有采样都是有限数（不是 NaN / Inf）；
+   *   2. 加速度模长在 [2, 40] m/s²：静止时约 9.79，剧烈运动也落在这个区间；
+   *      读回全 0 或全 0xFF 时会明显落在区间外；
+   *   3. 角速度绝对值 < 50 rad/s：任何正常的车都到不了这个量级。 */
+  constexpr float kAccNormMin = 2.0f;
+  constexpr float kAccNormMax = 40.0f;
+  constexpr float kGyroAbsMax = 50.0f;
+  constexpr uint16_t kBadLimit = 50;  ///< 连续 50 个采样（50ms）异常才判定失效
+
+  bool ok = true;
+
+  for (int i = 0; i < 3; ++i) {
+    if (!std::isfinite(acc_[i]) || !std::isfinite(gyro_bias_removed_[i])) {
+      ok = false;
+      break;
+    }
+  }
+
+  if (ok) {
+    const float acc_norm = std::sqrt(acc_[0] * acc_[0] + acc_[1] * acc_[1] +
+                                     acc_[2] * acc_[2]);
+    if (acc_norm < kAccNormMin || acc_norm > kAccNormMax) {
+      ok = false;
+    }
+  }
+
+  if (ok) {
+    for (int i = 0; i < 3; ++i) {
+      if (std::fabs(gyro_bias_removed_[i]) > kGyroAbsMax) {
+        ok = false;
+        break;
+      }
+    }
+  }
+
+  if (ok) {
+    consecutive_bad_ = 0;
+    healthy_ = true;
+  } else {
+    ++bad_samples_total_;
+    if (consecutive_bad_ < kBadLimit) {
+      ++consecutive_bad_;
+    }
+    if (consecutive_bad_ >= kBadLimit) {
+      healthy_ = false;
+    }
+  }
+}

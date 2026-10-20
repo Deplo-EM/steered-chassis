@@ -70,7 +70,7 @@ void CanFilter_Init(CAN_HandleTypeDef *hcan)
   }
 }
 
-void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
+bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
                   uint8_t len)
 {
   CAN_TxHeaderTypeDef tx_header = {0};
@@ -78,7 +78,9 @@ void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
   tx_header.IDE = CAN_ID_STD;
   tx_header.RTR = CAN_RTR_DATA;
   tx_header.DLC = len;
-  HAL_CAN_AddTxMessage(hcan, &tx_header, msg, &p_tx_mailbox);
+  /* 把 HAL 的结果如实返回：邮箱满 / 总线错误时这一帧**没发出去**，
+   * 调用方必须知道（尤其是急停时的零指令帧）。 */
+  return HAL_CAN_AddTxMessage(hcan, &tx_header, msg, &p_tx_mailbox) == HAL_OK;
 }
 
 /**
@@ -91,8 +93,9 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
   if (hcan == &hcan1) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header1,
                              can1_rx_data) == HAL_OK) {
-      /* 只处理标准帧（扩展帧本次用不到） */
-      if (rx_header1.IDE == CAN_ID_STD) {
+      /* 只接受「标准帧 + 数据帧 + 正好 8 字节」，其它一律丢弃 */
+      if (rx_header1.IDE == CAN_ID_STD && rx_header1.RTR == CAN_RTR_DATA &&
+          rx_header1.DLC == 8u) {
         DispatchCanFrame(rx_header1.StdId, can1_rx_data);
       }
     }
@@ -110,7 +113,8 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
   if (hcan == &hcan2) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &rx_header2,
                              can2_rx_data) == HAL_OK) {
-      if (rx_header2.IDE == CAN_ID_STD) {
+      if (rx_header2.IDE == CAN_ID_STD && rx_header2.RTR == CAN_RTR_DATA &&
+          rx_header2.DLC == 8u) {
         DispatchCanFrame(rx_header2.StdId, can2_rx_data);
       }
     }
@@ -137,8 +141,8 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
       continue;
     }
     if (hello_world::motor::M3508::GetRxId(motor->id()) == std_id) {
-      motor->decode(data);
-      if (robot != nullptr) {
+      /* 只有解码成功（长度/字段合法）才算「这帧有效」，才刷新在线时间 */
+      if (motor->decode(data) && robot != nullptr) {
         robot->notifyMotorRx(i);
       }
       return;
@@ -152,18 +156,18 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
       continue;
     }
     if (hello_world::motor::GM6020::GetRxId(motor->id()) == std_id) {
-      motor->decode(data);
-      if (robot != nullptr) {
+      if (motor->decode(data) && robot != nullptr) {
         robot->notifyMotorRx(4 + i);
       }
       return;
     }
   }
 
-  /* ---- 双板通信帧（云台 → 底盘，0x211） ---- */
+  /* ---- 双板通信帧（云台 → 底盘，0x211） ----
+   * decode 内部会校验 CRC 并自己记录成功/失败计数；返回值在这里不额外处理。 */
   robot::GimbalChassisComm *comm = GetGimbalChassisComm();
   if ((comm != nullptr) && (comm->rx_id() == std_id)) {
-    comm->decode(data);
+    (void)comm->decode(data);
     return;
   }
 

@@ -22,6 +22,7 @@
 #include <cstring>
 
 #include "chassis_ik_solver.hpp"
+#include "dbus_check.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "module_state.hpp"
 #include "pid.hpp"
@@ -216,8 +217,25 @@ void TestComm()
     uint8_t bad[8];
     std::memcpy(bad, good, sizeof(bad));
     bad[1] ^= 0xFF;
-    chassis.decode(bad);
+    /* 审计 H4：解码必须**返回失败**，调用方才知道这一帧不能拿去喂狗 */
+    EXPECT_TRUE(!chassis.decode(bad));
     EXPECT_NEAR(chassis.gimbal_data().yaw_joint, 1.0f, 1e-4f);
+    EXPECT_TRUE(chassis.rx_error_count() >= 1u);
+  }
+
+  BeginCase("双板协议：正常帧 decode 返回 true 并计数");
+  {
+    GimbalChassisComm chassis(GimbalChassisComm::CodePart::Chassis,
+                              robot::kCommIdChassisToGimbal,
+                              robot::kCommIdGimbalToChassis);
+    GimbalChassisComm gimbal(GimbalChassisComm::CodePart::Gimbal,
+                              robot::kCommIdGimbalToChassis,
+                              robot::kCommIdChassisToGimbal);
+    uint8_t frame[8];
+    gimbal.encode(frame);
+    EXPECT_TRUE(chassis.decode(frame));
+    EXPECT_EQ(chassis.rx_ok_count(), 1u);
+    EXPECT_EQ(chassis.rx_error_count(), 0u);
   }
 
   BeginCase("双板协议：没收到过帧时判定为离线");
@@ -239,6 +257,103 @@ void TestComm()
     EXPECT_EQ(chassis.tx_id(), gimbal.rx_id());
     EXPECT_EQ(chassis.rx_id(), gimbal.tx_id());
     EXPECT_TRUE(chassis.tx_id() != chassis.rx_id());
+  }
+}
+
+/* ========================================================================== */
+/* 二点五、DBUS 帧合法性校验（审计 H2 修复）                                   */
+/* ========================================================================== */
+namespace {
+
+/** 按 DBUS 的位排列，把第 index 个模拟通道写成 value */
+void SetDbusChannel(uint8_t d[18], int index, uint16_t value)
+{
+  if (index < 4) {
+    const int bit = index * 11;
+    const int byte = bit / 8;
+    const int shift = bit % 8;
+    uint32_t word = static_cast<uint32_t>(d[byte]) |
+                    (static_cast<uint32_t>(d[byte + 1]) << 8) |
+                    (static_cast<uint32_t>(d[byte + 2]) << 16);
+    word &= ~(0x7FFu << shift);
+    word |= (static_cast<uint32_t>(value) & 0x7FFu) << shift;
+    d[byte] = static_cast<uint8_t>(word & 0xFF);
+    d[byte + 1] = static_cast<uint8_t>((word >> 8) & 0xFF);
+    d[byte + 2] = static_cast<uint8_t>((word >> 16) & 0xFF);
+  } else {
+    d[16] = static_cast<uint8_t>(value & 0xFF);
+    d[17] = static_cast<uint8_t>((value >> 8) & 0x07);
+  }
+}
+
+/** 造一帧「合法」的 DBUS 数据：5 个通道都在中位，拨杆都在上 */
+void MakeValidDbusFrame(uint8_t d[18])
+{
+  std::memset(d, 0, 18);
+  for (int i = 0; i < 5; ++i) {
+    SetDbusChannel(d, i, 1024);
+  }
+  /* 第 5 字节：bit4~5 右拨杆、bit6~7 左拨杆；低 4 位属于通道 3，要保留 */
+  d[5] = static_cast<uint8_t>((d[5] & 0x0F) | (1u << 4) | (1u << 6));
+}
+
+}  // namespace
+
+void TestDbusCheck()
+{
+  using robot::DbusChannel;
+  using robot::IsDbusFrameValid;
+
+  uint8_t frame[18];
+
+  BeginCase("DBUS 校验：合法的中位帧应通过");
+  {
+    MakeValidDbusFrame(frame);
+    for (int i = 0; i < 5; ++i) {
+      EXPECT_EQ(DbusChannel(frame, i), 1024);
+    }
+    EXPECT_TRUE(IsDbusFrameValid(frame));
+  }
+
+  BeginCase("DBUS 校验：全零帧必须判非法（接收机掉电的典型表现）");
+  {
+    std::memset(frame, 0, sizeof(frame));
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+  }
+
+  BeginCase("DBUS 校验：通道超出 364~1684 必须判非法（字节错位）");
+  {
+    MakeValidDbusFrame(frame);
+    SetDbusChannel(frame, 0, 300);  // 低于下限
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+
+    MakeValidDbusFrame(frame);
+    SetDbusChannel(frame, 3, 1900);  // 高于上限
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+  }
+
+  BeginCase("DBUS 校验：拨杆出现 0 必须判非法");
+  {
+    MakeValidDbusFrame(frame);
+    frame[5] = static_cast<uint8_t>(frame[5] & ~0x30u);  // 右拨杆清成 0
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+  }
+
+  BeginCase("DBUS 校验：拨杆 2(下) / 3(中) 都是合法值");
+  {
+    MakeValidDbusFrame(frame);
+    frame[5] = static_cast<uint8_t>((frame[5] & 0x0F) | (2u << 4) | (3u << 6));
+    EXPECT_TRUE(IsDbusFrameValid(frame));
+    EXPECT_EQ(static_cast<int>((frame[5] >> 4) & 0x03), 2);
+    EXPECT_EQ(static_cast<int>((frame[5] >> 6) & 0x03), 3);
+  }
+
+  BeginCase("DBUS 校验：边界值 364 / 1684 应通过");
+  {
+    MakeValidDbusFrame(frame);
+    SetDbusChannel(frame, 0, 364);
+    SetDbusChannel(frame, 1, 1684);
+    EXPECT_TRUE(IsDbusFrameValid(frame));
   }
 }
 
@@ -547,6 +662,7 @@ int main()
 
   TestPid();
   TestComm();
+  TestDbusCheck();
   TestIkSolver();
   TestFollowModeSimulation();
   TestAngleWrap();

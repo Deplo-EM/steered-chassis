@@ -134,11 +134,18 @@ class GimbalChassisComm {
 
   /* 编码己方帧：把本地 ChassisData / GimbalData 打包进 8 字节。 */
   void encode(uint8_t tx_data[8]);
-  /* 解码对方帧：把 8 字节还原成对方语义并更新本地缓存。 */
-  void decode(const uint8_t rx_data[8]);
+  /* 解码对方帧：把 8 字节还原成对方语义并更新本地缓存。
+   * @retval true 校验通过、数据已更新；false CRC 错误，整帧丢弃、缓存保持原值。
+   * @note  返回值很重要：调用方必须只在 true 时认为"对方活着"（喂狗、刷新时间戳），
+   *        否则一帧干扰数据也能把看门狗喂住。 */
+  bool decode(const uint8_t rx_data[8]);
 
   /* 判断对方是否离线（超过阈值时长未收到新帧）。 */
   bool isOffline() const;
+
+  /* 通信质量计数（调试用；CRC 错误持续增长说明总线或协议有问题） */
+  uint32_t rx_ok_count() const { return rx_ok_count_; }
+  uint32_t rx_error_count() const { return rx_error_count_; }
 
   /* 本板发送帧的 CAN ID（Task 层发帧时用） */
   uint32_t tx_id() const { return tx_id_; }
@@ -158,6 +165,8 @@ class GimbalChassisComm {
   uint32_t last_rx_tick_;  ///< 上次收到对方帧的 GetTickMs() 时间戳
   bool received_ = false;  ///< 是否收到过至少一帧（没收到过时一律算离线）
   uint8_t tx_seq_ = 0;     ///< 发送序号
+  uint32_t rx_ok_count_ = 0;     ///< 成功解码的帧数
+  uint32_t rx_error_count_ = 0;  ///< CRC 错误的帧数
   ChassisData chassis_data_;
   GimbalData gimbal_data_;
 };

@@ -133,13 +133,34 @@ class Imu {
   /** 芯片初始化错误码（BMI088ErrState 的或运算结果），0 表示正常 */
   uint8_t errorState() const { return static_cast<uint8_t>(error_state_); }
 
+  /**
+   * @brief 运行期数据是否合理
+   * @note  初始化成功 ≠ 运行期一直正常：SPI 接触不良、芯片被干扰时，
+   *        读回来的是一堆无意义的值（全 0、全 0xFF、NaN）。
+   *        判据：所有采样都是有限数、加速度模长在 [2, 40] m/s²
+   *        （静止时约 9.79，剧烈运动也在范围内）、角速度绝对值 < 50 rad/s。
+   *        连续 50 个采样异常 → healthy_ = false，状态机应立刻回 Dead。
+   */
+  bool isHealthy() const { return healthy_; }
+
+  /** 累计异常采样数（调试用） */
+  uint32_t badSamples() const { return bad_samples_total_; }
+
  private:
+  /** 每周期更新健康状态 */
+  void updateHealth();
+
   BMI088 bmi_;                ///< 芯片驱动
   ahrs::Mahony ahrs_;         ///< 姿态解算
   BMI088ErrState error_state_ = kBMI088ErrStateNoErr;
 
   bool inited_ = false;
   bool calibrated_ = false;
+
+  /* 运行期健康状态 */
+  bool healthy_ = false;          ///< 上电后要先采到合理数据才为 true
+  uint16_t consecutive_bad_ = 0;  ///< 连续异常采样数
+  uint32_t bad_samples_total_ = 0;
 
   /* 零漂标定累加器 */
   uint16_t samples_ = 0;

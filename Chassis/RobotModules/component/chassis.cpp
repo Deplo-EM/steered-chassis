@@ -142,21 +142,4 @@ void robot::Chassis::stop()
   solver_->reset(steer_now);
 }
 
-void robot::Chassis::centerSteer(float dt)
-{
-  if (!ready_) {
-    return;
-  }
-
-  for (int i = 0; i < kWheelNum; ++i) {
-    /* 轮子不出力 */
-    wheels_[i]->setInput(0.0f);
-    wheel_pids_[i]->reset(wheels_[i]->vel());
-
-    /* 舵角朝 0 转：目标就是 0，误差归一化到 ±π */
-    const float steer_err = robot::WrapPi(0.0f - steers_[i]->angle());
-    steers_[i]->setInput(steer_pids_[i]->updateError(steer_err, dt));
-  }
-}
-
 /* Private function definitions ----------------------------------------------*/

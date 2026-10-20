@@ -5,20 +5,29 @@
  * @history   :
  *  Version     Date            Author          Note
  *  V1.0.0      2026-10-19      <author>        1. 完成编写
+ *  V1.1.0      2026-10-20      <author>        2. 审计修复：喂狗改为「控制循环跑完才喂」，
+ *                                                且非法 DBUS 帧不再视为遥控在线
  *******************************************************************************
  * @attention :
- *  【为什么「收」在中断里，「发」在定时任务里】
- *  收：数据什么时候来不确定（DBUS 100Hz、CAN 1kHz），只能被动等中断。
- *  发：控制周期固定 1ms，集中在下发时刻统一发，帧率稳定、也方便和状态机对齐。
+ *  【看门狗到底在监督什么（V1.1 修正）】
+ *  最初的实现把喂狗放在 UART 接收中断里。问题是：UART 中断优先级高于 TIM6，
+ *  所以哪怕控制循环（TIM6）因为 SPI 卡死、死循环而完全停住，UART 中断照样
+ *  会进来喂狗 —— 看门狗就永远等不到复位，考核要求的「任务卡死 200ms 复位」
+ *  形同虚设。
  *
- *  【看门狗喂狗条件（这是硬性验收项）】
- *  只在「收到有效遥控器数据」时喂狗。遥控器一关，200ms 后板子自动复位停机。
- *  这看起来「很暴力」，但正是考核要求的：宁可整机复位，也绝不允许一台
- *  「主人已经失联的车」继续转。
+ *  现在的做法：
+ *    1. 中断里**只记录**「收到了一帧合法 DBUS」这件事（时间戳 + 计数），不喂狗；
+ *    2. 唯一的喂狗点在 CommTask 的最后一行；
+ *    3. 而 CommTask 是由 TIM6 中断在 MainTask() **之后**调用的。
+ *  于是：只要控制循环没跑完这一整轮，就不会喂狗 → 200ms 后复位。
  *
- *  ⚠️ 副作用：上电时如果遥控器没开机，板子会每 200ms 复位一次（表现为
- *  LED 闪烁 / 连不上调试器）。这是预期行为，不是板子坏了。
- *  调车时若确实需要不开遥控器调试，把 kWatchdogFeedEnable 临时改成 false。
+ *  【为什么要校验 DBUS 帧】
+ *  串口错位、噪声、接收机掉电时的全零数据，都可能凑够 18 字节。不校验就把
+ *  它们当有效指令，等于「谁都能让这台车继续动」。校验规则见 dbus_check.hpp。
+ *  非法帧：不解码、不刷新在线时间戳、不喂狗。
+ *
+ *  ⚠️ 副作用：上电时遥控器没开机 → 板子每 200ms 复位一次（预期行为）。
+ *  调车时确实需要不开遥控器，把 kWatchdogFeedEnable 临时改成 false。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -30,11 +39,13 @@
 #include "DT7.hpp"
 #include "HW_can.hpp"
 #include "can.h"
+#include "dbus_check.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "ins_all.hpp"
 #include "iwdg.h"
 #include "motor.hpp"
 #include "robot.hpp"
+#include "tick.hpp"
 #include "usart.h"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
@@ -44,13 +55,48 @@ namespace {
 /** 是否启用看门狗喂狗（调车阶段可临时关掉；验收时必须为 true） */
 constexpr bool kWatchdogFeedEnable = true;
 
+/** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
+constexpr uint32_t kDbusTimeoutMs = 100u;
+
 /** DBUS 接收缓冲区：固定 18 字节 */
 uint8_t s_dbus_buf[hello_world::remote_control::kRcRxDataLen];
+
+/** 最近一帧「合法」DBUS 的时间戳（只由 UART 中断写） */
+volatile uint32_t s_last_valid_dbus_tick = 0;
+/** 是否收到过至少一帧合法数据（防止上电瞬间被误判为在线） */
+volatile bool s_dbus_received = false;
+/** 统计：合法 / 非法帧数（调试用） */
+volatile uint32_t s_dbus_valid_frames = 0;
+volatile uint32_t s_dbus_invalid_frames = 0;
+
+/** CAN 发送失败计数（邮箱满 / 总线错误时会增长） */
+uint32_t s_can_tx_fail_count = 0;
 
 /** CAN 发送缓冲（每个控制周期复用，避免频繁压栈） */
 uint8_t s_wheel_frame[8];
 uint8_t s_steer_frame[8];
 uint8_t s_comm_frame[8];
+
+/**
+ * @brief 遥控数据是否足够新（决定这一周期能不能喂狗）
+ * @note  两条合法来源：
+ *        1. 本板自己收到过合法 DBUS 帧，且不超过 100ms；
+ *        2. 云台板的帧说「它那边的遥控器在线」（接收机可能接在云台板）。
+ *        注意第 2 条只用于**保活**，不用于授权控制：底盘板没有自己的遥控数据
+ *        时仍然进不了 Working、输出仍然是 0。
+ */
+bool RemoteAliveForWatchdog()
+{
+  const bool local =
+      s_dbus_received &&
+      ((hello_world::tick::GetTickMs() - s_last_valid_dbus_tick) <= kDbusTimeoutMs);
+
+  robot::GimbalChassisComm* comm = GetGimbalChassisComm();
+  const bool peer = (comm != nullptr) && !comm->isOffline() &&
+                    comm->gimbal_data().dbus_online;
+
+  return local || peer;
+}
 
 }  // namespace
 
@@ -59,8 +105,7 @@ uint8_t s_comm_frame[8];
 void CommTaskInit(void)
 {
   /* ---------- 1. CAN 滤波器 + 启动 CAN ----------
-   * 滤波器「全收」，具体要哪一帧由接收回调里按 ID 分发决定。
-   * 用全收的好处：调试时能看到总线上所有帧，不怕漏配。 */
+   * 滤波器「全收」，具体要哪一帧由接收回调里按 ID 分发决定。 */
   CanFilter_Init(&hcan1);
   CanFilter_Init(&hcan2);
 
@@ -71,23 +116,20 @@ void CommTaskInit(void)
   HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
   HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO1_MSG_PENDING);
 
-  /* ---------- 2. 启动 DBUS 接收 ----------
-   * 空闲 + DMA：数据停止到来（一帧 18 字节收完）时触发回调。
-   * 遥控器 100Hz，所以每 10ms 会进一次 HAL_UARTEx_RxEventCallback。 */
+  /* ---------- 2. 启动 DBUS 接收 ---------- */
   HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf,
                                hello_world::remote_control::kRcRxDataLen);
 
   /* ---------- 3. 看门狗 ----------
-   * IWDG 已经在 MX_IWDG_Init() 里启动（约 200ms 超时），这里不需要再初始化，
-   * 只需要之后在收到遥控器数据时刷新（见 HAL_UARTEx_RxEventCallback）。 */
+   * IWDG 已经在 MX_IWDG_Init() 里启动（约 200ms 超时）。这里不喂，
+   * 第一帧合法 DBUS 到达后、由 CommTask 每 1ms 喂一次。 */
 }
 
 void CommTask(void)
 {
   /* ---------- 1. 下发驱动电机（4 台共用 0x200） ----------
-   * 注意：encode() 只会往缓冲区里「自己那 2 个字节」写数据
-   * （索引 = (id-1)%4），所以 4 台电机依次编码到同一块缓冲区，
-   * 最后发一帧即可。如果每台电机各发一帧，后发的会把先发的覆盖掉。 */
+   * encode() 只会往缓冲区里「自己那 2 个字节」写数据（索引 = (id-1)%4），
+   * 所以 4 台电机依次编码到同一块缓冲区，最后发一帧即可。 */
   for (uint8_t i = 0; i < 8; ++i) {
     s_wheel_frame[i] = 0;
   }
@@ -99,8 +141,10 @@ void CommTask(void)
         motor->encode(s_wheel_frame);
       }
     }
-    CAN_Send_Msg(&hcan1, s_wheel_frame,
-                 hello_world::motor::M3508::GetTxId(wheel0->id()), 8);
+    if (!CAN_Send_Msg(&hcan1, s_wheel_frame,
+                      hello_world::motor::M3508::GetTxId(wheel0->id()), 8)) {
+      ++s_can_tx_fail_count;
+    }
   }
 
   /* ---------- 2. 下发转向电机（4 台共用 0x1FF 电压帧） ---------- */
@@ -115,26 +159,27 @@ void CommTask(void)
         motor->encode(s_steer_frame);
       }
     }
-    CAN_Send_Msg(&hcan2, s_steer_frame,
-                 hello_world::motor::GM6020::GetTxId(
-                     steer0->id(), steer0->get_input_type()),
-                 8);
+    if (!CAN_Send_Msg(&hcan2, s_steer_frame,
+                      hello_world::motor::GM6020::GetTxId(
+                          steer0->id(), steer0->get_input_type()),
+                      8)) {
+      ++s_can_tx_fail_count;
+    }
   }
 
-  /* ---------- 3. 双板通信帧 ----------
-   * 本板走 CAN1（与云台板的 CAN1 相连）。帧 ID 由通信对象自己给出。 */
+  /* ---------- 3. 双板通信帧 ---------- */
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   if (comm != nullptr) {
     comm->encode(s_comm_frame);
-    CAN_Send_Msg(&hcan1, s_comm_frame, comm->tx_id(), 8);
+    if (!CAN_Send_Msg(&hcan1, s_comm_frame, comm->tx_id(), 8)) {
+      ++s_can_tx_fail_count;
+    }
   }
 
-  /* ---------- 4. 看门狗 ----------
-   * 主要在 DBUS 中断里喂（见下）。这里补一条「云台板说遥控器在线」的路径：
-   * 万一接收机接在云台板上，底盘板也能正常活下去；遥控器一关，两条路径
-   * 同时断掉，板子照样会复位停机。 */
-  if (kWatchdogFeedEnable && (comm != nullptr) && !comm->isOffline() &&
-      comm->gimbal_data().dbus_online) {
+  /* ---------- 4. 看门狗：整个周期都跑完了才喂 ----------
+   * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
+   * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。 */
+  if (kWatchdogFeedEnable && RemoteAliveForWatchdog()) {
     HAL_IWDG_Refresh(&hiwdg);
   }
 }
@@ -143,32 +188,28 @@ void CommTask(void)
 
 /**
  * @brief UART 空闲中断回调：DBUS 一帧收完时进入
- * @note  必须用 extern "C"：C 链接的中断向量表才能找到这个函数。
- *        如果不加，链接器会找不到符号（表现为程序卡在启动文件里）。
+ * @note  必须用 extern "C"，否则中断向量表找不到这个符号。
+ *        这里**不喂狗**，只记录「收到了一帧合法数据」。
  */
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
-  if (huart != &huart3) {
-    return;
-  }
-
-  if (Size == hello_world::remote_control::kRcRxDataLen) {
-    /* 解包：18 字节 DBUS → 摇杆 / 拨杆 / 按键 */
-    hello_world::remote_control::DT7* rc = GetRemoteControl();
-    if (rc != nullptr) {
-      rc->decode(s_dbus_buf);
-    }
-
-    /* 告诉 Robot「遥控器活着」，顺便刷新它内部的掉线计时 */
-    robot::Robot* robot = GetRobot();
-    if (robot != nullptr) {
-      robot->notifyRemoteRx();
-    }
-
-    /* ★ 看门狗喂狗点：只有拿到有效遥控器数据才喂 ★ */
-    if (kWatchdogFeedEnable) {
-      HAL_IWDG_Refresh(&hiwdg);
+  if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
+    /* 先校验，再解码。非法帧一律当作「没收到」。 */
+    if (robot::IsDbusFrameValid(s_dbus_buf)) {
+      hello_world::remote_control::DT7* rc = GetRemoteControl();
+      if (rc != nullptr) {
+        rc->decode(s_dbus_buf);
+      }
+      robot::Robot* robot_ptr = GetRobot();
+      if (robot_ptr != nullptr) {
+        robot_ptr->notifyRemoteRx();
+      }
+      s_last_valid_dbus_tick = hello_world::tick::GetTickMs();
+      s_dbus_received = true;
+      ++s_dbus_valid_frames;
+    } else {
+      ++s_dbus_invalid_frames;
     }
   }
 

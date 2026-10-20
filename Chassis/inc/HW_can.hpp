@@ -43,9 +43,11 @@ void CanFilter_Init(CAN_HandleTypeDef *hcan);
  * @param       msg: 待发送的 8 字节数据首地址
  * @param       id: 标准帧 ID（11 位）
  * @param       len: 数据长度（字节数，一般 8）
- * @retval      None
+ * @retval      true 已成功放进发送邮箱；false 邮箱已满 / 总线错误（这一帧没发出去）
+ * @note        返回值必须检查：急停时如果零指令帧没发出去，电机（尤其达妙）
+ *              可能继续执行上一条指令。调用方应统计失败次数，验收时观察它是否为 0。
  */
-void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
+bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
                   uint8_t len);
 
 #ifdef __cplusplus

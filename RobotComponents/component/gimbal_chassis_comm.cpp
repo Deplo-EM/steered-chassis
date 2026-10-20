@@ -135,12 +135,13 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
   tx_data[7] = CalcCrc(tx_data);
 }
 
-void robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
+bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
   /* ---- 第一步：校验 ----
    * CRC 不对就整帧丢弃，并且不刷新 last_rx_tick_（等于当成没收到）。
-   * 这样即使总线上有干扰，也不会把垃圾数据当成有效指令去驱动电机。 */
+   * 返回 false 让调用方知道「这一帧不能用」——不要拿旧缓存去喂狗。 */
   if (rx_data[7] != CalcCrc(rx_data)) {
-    return;
+    ++rx_error_count_;
+    return false;
   }
 
   const uint8_t flags = rx_data[0];
@@ -175,6 +176,8 @@ void robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
   /* 只有校验通过、字段解析完成，才认为「对方还活着」 */
   last_rx_tick_ = hello_world::tick::GetTickMs();
   received_ = true;
+  ++rx_ok_count_;
+  return true;
 }
 
 bool robot::GimbalChassisComm::isOffline() const {

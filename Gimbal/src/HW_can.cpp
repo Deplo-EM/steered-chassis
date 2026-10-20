@@ -21,16 +21,10 @@
 #include "can.h"
 #include "gimbal_chassis_comm.hpp"
 #include "ins_all.hpp"
-#include "iwdg.h"
 #include "motor.hpp"
 #include "robot.hpp"
 
 /* Private constants ---------------------------------------------------------*/
-namespace {
-/** 是否启用「解包底盘帧时喂狗」（与 comm_task.cpp 的开关保持一致） */
-constexpr bool kWatchdogFeedEnable = true;
-}  // namespace
-
 /* Private variables ---------------------------------------------------------*/
 static CAN_RxHeaderTypeDef rx_header1;
 static CAN_RxHeaderTypeDef rx_header2;
@@ -71,7 +65,7 @@ void CanFilter_Init(CAN_HandleTypeDef *hcan)
   }
 }
 
-void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
+bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
                   uint8_t len)
 {
   CAN_TxHeaderTypeDef tx_header = {0};
@@ -79,7 +73,9 @@ void CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
   tx_header.IDE = CAN_ID_STD;
   tx_header.RTR = CAN_RTR_DATA;
   tx_header.DLC = len;
-  HAL_CAN_AddTxMessage(hcan, &tx_header, msg, &p_tx_mailbox);
+  /* 邮箱满 / 总线错误时这一帧**没发出去**。达妙是"不收到新指令就保持上一帧"，
+   * 所以发送失败必须让调用方知道（急停时的零力矩帧尤为关键）。 */
+  return HAL_CAN_AddTxMessage(hcan, &tx_header, msg, &p_tx_mailbox) == HAL_OK;
 }
 
 /**
@@ -91,7 +87,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
   if (hcan == &hcan1) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header1,
                              can1_rx_data) == HAL_OK) {
-      if (rx_header1.IDE == CAN_ID_STD) {
+      if (rx_header1.IDE == CAN_ID_STD && rx_header1.RTR == CAN_RTR_DATA &&
+          rx_header1.DLC == 8u) {
         DispatchCanFrame(rx_header1.StdId, can1_rx_data);
       }
     }
@@ -108,7 +105,8 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
   if (hcan == &hcan2) {
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &rx_header2,
                              can2_rx_data) == HAL_OK) {
-      if (rx_header2.IDE == CAN_ID_STD) {
+      if (rx_header2.IDE == CAN_ID_STD && rx_header2.RTR == CAN_RTR_DATA &&
+          rx_header2.DLC == 8u) {
         DispatchCanFrame(rx_header2.StdId, can2_rx_data);
       }
     }
@@ -130,8 +128,7 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
   hello_world::motor::Motor *yaw = GetMotorYaw();
   if ((yaw != nullptr) &&
       (hello_world::motor::DM_J4310::GetRxId(yaw->id()) == std_id)) {
-    yaw->decode(data);
-    if (robot != nullptr) {
+    if (yaw->decode(data) && robot != nullptr) {
       robot->notifyMotorRx(0);
     }
     return;
@@ -141,22 +138,19 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
   hello_world::motor::Motor *pitch = GetMotorPitch();
   if ((pitch != nullptr) &&
       (hello_world::motor::DM_J4310::GetRxId(pitch->id()) == std_id)) {
-    pitch->decode(data);
-    if (robot != nullptr) {
+    if (pitch->decode(data) && robot != nullptr) {
       robot->notifyMotorRx(1);
     }
     return;
   }
 
   /* ---- 双板通信帧（底盘 → 云台，0x210） ----
-   * 这里是考核资料里说的「上板在解包下板信息处刷新看门狗」：
-   * 底盘帧里的 dbus_online 就是「遥控器还活着」的证据。 */
+   * 注意：这里**不喂狗**。喂狗统一在 CommTask 的最后一行（控制周期跑完之后），
+   * 否则控制循环卡死时本中断仍会来喂，看门狗就失效了。
+   * 本处只负责把数据解出来，CommTask 会读 chassis_data().dbus_online 决定是否喂。 */
   robot::GimbalChassisComm *comm = GetGimbalChassisComm();
   if ((comm != nullptr) && (comm->rx_id() == std_id)) {
-    comm->decode(data);
-    if (kWatchdogFeedEnable && comm->chassis_data().dbus_online) {
-      HAL_IWDG_Refresh(&hiwdg);
-    }
+    (void)comm->decode(data);
     return;
   }
 
