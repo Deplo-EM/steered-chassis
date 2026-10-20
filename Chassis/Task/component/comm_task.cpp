@@ -27,7 +27,8 @@
  *  非法帧：不解码、不刷新在线时间戳、不喂狗。
  *
  *  ⚠️ 副作用：上电时遥控器没开机 → 板子每 200ms 复位一次（预期行为）。
- *  调车时确实需要不开遥控器，把 kWatchdogFeedEnable 临时改成 false。
+ *  台架上需要不开遥控器调试时，把 kDebugAlwaysFeedWatchdog 改成 true
+ *  （= 无条件喂狗，板子不再复位）；验收前必须改回 false。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -52,8 +53,15 @@
 
 namespace {
 
-/** 是否启用看门狗喂狗（调车阶段可临时关掉；验收时必须为 true） */
-constexpr bool kWatchdogFeedEnable = true;
+/**
+ * @brief 调试模式：无条件喂狗
+ * @note  **正常情况下必须是 false**（只有控制周期跑完 + 遥控数据新鲜才喂）。
+ *        台架上需要连着调试器、又不接遥控器时，可以临时改成 true —— 此时
+ *        看门狗不再起保护作用，**绝不能用于实车控制**，验收前必须改回来。
+ *        注意：改成 true 的效果是「板子不再复位」；改成 false（默认）才是
+ *        「条件喂狗、关遥控器会复位」。审计 F2 指出的正是原文档把这两个方向说反了。
+ */
+constexpr bool kDebugAlwaysFeedWatchdog = false;
 
 /** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
 constexpr uint32_t kDbusTimeoutMs = 100u;
@@ -179,7 +187,10 @@ void CommTask(void)
   /* ---------- 4. 看门狗：整个周期都跑完了才喂 ----------
    * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
    * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。 */
-  if (kWatchdogFeedEnable && RemoteAliveForWatchdog()) {
+  if (kDebugAlwaysFeedWatchdog) {
+    /* 调试模式：无条件喂（仅台架，绝不上车） */
+    HAL_IWDG_Refresh(&hiwdg);
+  } else if (RemoteAliveForWatchdog()) {
     HAL_IWDG_Refresh(&hiwdg);
   }
 }

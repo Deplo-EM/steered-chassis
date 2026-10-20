@@ -44,6 +44,21 @@ constexpr float kMaxChassisW = 6.0f;     ///< 底盘自转角速度上限，rad/
 constexpr float kMaxSpinW = 6.0f;        ///< 小陀螺最大自旋，rad/s（≈1 转/秒）
 constexpr float kMinSpinW = 1.5f;        ///< 小陀螺最小自旋，rad/s（保证「非零旋转分量」）
 
+/** 所有模式里允许出现的最大 |w|（模式间取大者），用于最后一道兜底限幅 */
+constexpr float kMaxAbsW =
+    (kMaxChassisW > kMaxSpinW) ? kMaxChassisW : kMaxSpinW;
+
+/**
+ * @brief 把摇杆值钳到 [-1, 1]
+ * @note  摇杆的正常范围就是 [-1,1]。这里再钳一次是防御性的：
+ *        万一解码/校验环节出问题（例如校验器与解码器位宽不一致，
+ *        见审计 F1），也不会让越界值直接乘上速度上限变成失控指令。
+ */
+inline float UnitClamp(float value)
+{
+  return (value > 1.0f) ? 1.0f : ((value < -1.0f) ? -1.0f : value);
+}
+
 /* ---------------- 加速度限幅（让起步/停车平顺，保护机械） ---------------- */
 constexpr float kLinearAccel = 8.0f;    ///< m/s²
 constexpr float kAngularAccel = 25.0f;  ///< rad/s²
@@ -282,20 +297,23 @@ void robot::Robot::generateCommand()
 {
   const bool remote_ok = isRemoteOnline();
 
-  /* ---------------- 平移：摇杆 → 云台坐标系速度 ---------------- */
+  /* ---------------- 平移：摇杆 → 云台坐标系速度 ----------------
+   * UnitClamp：摇杆理论上在 [-1,1]，但上游一旦给出越界值（协议改动、
+   * 解码器与校验器位宽不一致等），直接乘上限会得到离谱的目标速度。
+   * 限幅要放在「用之前」，不能只依赖后面的加速度斜坡（斜坡只限变化率）。 */
   ChassisMotion raw;
   if (remote_ok) {
     /* 左摇杆向上（+）→ 沿云台 x 轴前进；
      * 左摇杆向右（+）→ 云台系 y 轴是「左」，所以取负。 */
-    raw.vx = rc_->rc_lv() * kMaxLinearSpeed;
-    raw.vy = -rc_->rc_lh() * kMaxLinearSpeed;
+    raw.vx = UnitClamp(rc_->rc_lv()) * kMaxLinearSpeed;
+    raw.vy = -UnitClamp(rc_->rc_lh()) * kMaxLinearSpeed;
   }
 
   /* ---------------- 旋转：按模式给 w ---------------- */
   switch (mode_) {
     case ChassisMode::kSeparate:
       /* 分离：底盘不自旋，w 直接由拨轮给（操作手想转多少就转多少） */
-      raw.w = remote_ok ? (rc_->rc_wheel() * kMaxChassisW) : 0.0f;
+      raw.w = remote_ok ? (UnitClamp(rc_->rc_wheel()) * kMaxChassisW) : 0.0f;
       break;
 
     case ChassisMode::kFollow: {
@@ -311,7 +329,7 @@ void robot::Robot::generateCommand()
     case ChassisMode::kSpin: {
       /* 小陀螺：必须有非零旋转分量。
        * 拨轮大小决定转速，正负决定转向；拨轮回中时用最小转速继续转。 */
-      const float wheel = remote_ok ? rc_->rc_wheel() : 0.0f;
+      const float wheel = remote_ok ? UnitClamp(rc_->rc_wheel()) : 0.0f;
       const float magnitude =
           kMinSpinW + std::fabs(wheel) * (kMaxSpinW - kMinSpinW);
       const float direction = (wheel < -0.05f) ? -1.0f : 1.0f;
@@ -323,6 +341,13 @@ void robot::Robot::generateCommand()
       raw.reset();
       break;
   }
+
+  /* ---------------- 兜底限幅 ----------------
+   * 不管走哪个分支，目标都不能超过声明上限。这是一道独立的防线：
+   * 即使上面的某个分支将来被改错，也不会把整车指令放大到失控。 */
+  raw.vx = robot::Clamp(raw.vx, -kMaxLinearSpeed, kMaxLinearSpeed);
+  raw.vy = robot::Clamp(raw.vy, -kMaxLinearSpeed, kMaxLinearSpeed);
+  raw.w = robot::Clamp(raw.w, -kMaxAbsW, kMaxAbsW);
 
   /* ---------------- 加速度限幅 ---------------- */
   ramped_.vx = Slew(ramped_.vx, raw.vx, kLinearAccel * kDt);
@@ -341,11 +366,13 @@ void robot::Robot::updateGimbalCommand()
   }
 
   /* 右摇杆向右（+）→ 云台顺时针转 → yaw 角减小（逆时针为正） */
-  gimbal_yaw_rate_ = -rc_->rc_rh() * kMaxGimbalYawRate;
+  gimbal_yaw_rate_ = -UnitClamp(rc_->rc_rh()) * kMaxGimbalYawRate;
+  gimbal_yaw_rate_ =
+      robot::Clamp(gimbal_yaw_rate_, -kMaxGimbalYawRate, kMaxGimbalYawRate);
 
   /* 右摇杆向上（+）→ 枪口抬高。这里给的是「关节角目标」，由云台板做位置环。 */
   gimbal_pitch_target_ +=
-      rc_->rc_rv() * kPitchStickSign * kGimbalPitchRate * kDt;
+      UnitClamp(rc_->rc_rv()) * kPitchStickSign * kGimbalPitchRate * kDt;
   gimbal_pitch_target_ =
       robot::Clamp(gimbal_pitch_target_, kPitchLowerLimit, kPitchUpperLimit);
 }

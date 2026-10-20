@@ -57,10 +57,29 @@ void hello_world::imu::Imu::update()
   /* ---------- 1. 读芯片 ---------- */
   bmi_.getData(acc_, gyro_bias_removed_, &temperature_);
 
-  /* ---------- 1.5 运行期健康检查（审计 M3） ----------
-   * 初始化成功不代表运行中一直正常。SPI 接触不良时读回来的可能是全 0、
-   * 全 0xFF 或 NaN，这里统一判掉，交给状态机回 Dead。 */
-  updateHealth();
+  /* ---------- 1.5 运行期健康检查（审计 M3 + F3） ----------
+   * ★ 坏样本**根本不进入**标定和 Mahony。如果先喂给滤波器再判"不健康"，
+   *   一次坏数据就会把姿态拉歪，恢复起来要好几百毫秒。 */
+  if (!IsSampleOk()) {
+    ++bad_samples_total_;
+    if (consecutive_bad_ < kImuBadSampleLimit) {
+      ++consecutive_bad_;
+    }
+    if (consecutive_bad_ >= kImuBadSampleLimit) {
+      healthy_ = false;
+    }
+    consecutive_good_ = 0;
+    return;  /* 本周期不更新姿态，保持上一次的合理值 */
+  }
+
+  /* 好样本：要连续好够久才恢复健康，避免"一次正常采样就痊愈"（审计 F3） */
+  consecutive_bad_ = 0;
+  if (consecutive_good_ < kImuGoodSampleLimit) {
+    ++consecutive_good_;
+  }
+  if (consecutive_good_ >= kImuGoodSampleLimit) {
+    healthy_ = true;
+  }
 
   /* ---------- 2. 零漂标定 ---------- */
   if (!calibrated_) {
@@ -111,54 +130,38 @@ void hello_world::imu::Imu::update()
 
 /* Private function definitions ----------------------------------------------*/
 
-void hello_world::imu::Imu::updateHealth()
+bool hello_world::imu::Imu::IsSampleOk() const
 {
-  /* 判据（都要满足才认为数据可信）：
+  /* 判据（全部满足才认为这一个采样可信）：
    *   1. 所有采样都是有限数（不是 NaN / Inf）；
    *   2. 加速度模长在 [2, 40] m/s²：静止时约 9.79，剧烈运动也落在这个区间；
    *      读回全 0 或全 0xFF 时会明显落在区间外；
-   *   3. 角速度绝对值 < 50 rad/s：任何正常的车都到不了这个量级。 */
+   *   3. 角速度绝对值 < 50 rad/s：任何正常的车都到不了这个量级。
+   *
+   * ⚠️ 局限（审计 F3 指出）：BMI088 驱动把 HAL_SPI 的返回值丢掉了，所以
+   *    "读数冻结在物理上合理的旧值"这种情况这里检测不到。要彻底解决需要改
+   *    芯片驱动去上报 SPI 状态，属于另一个层面的改动，已在 docs/07 记录。 */
   constexpr float kAccNormMin = 2.0f;
   constexpr float kAccNormMax = 40.0f;
   constexpr float kGyroAbsMax = 50.0f;
-  constexpr uint16_t kBadLimit = 50;  ///< 连续 50 个采样（50ms）异常才判定失效
-
-  bool ok = true;
 
   for (int i = 0; i < 3; ++i) {
     if (!std::isfinite(acc_[i]) || !std::isfinite(gyro_bias_removed_[i])) {
-      ok = false;
-      break;
+      return false;
     }
   }
 
-  if (ok) {
-    const float acc_norm = std::sqrt(acc_[0] * acc_[0] + acc_[1] * acc_[1] +
-                                     acc_[2] * acc_[2]);
-    if (acc_norm < kAccNormMin || acc_norm > kAccNormMax) {
-      ok = false;
+  const float acc_norm = std::sqrt(acc_[0] * acc_[0] + acc_[1] * acc_[1] +
+                                   acc_[2] * acc_[2]);
+  if (acc_norm < kAccNormMin || acc_norm > kAccNormMax) {
+    return false;
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    if (std::fabs(gyro_bias_removed_[i]) > kGyroAbsMax) {
+      return false;
     }
   }
 
-  if (ok) {
-    for (int i = 0; i < 3; ++i) {
-      if (std::fabs(gyro_bias_removed_[i]) > kGyroAbsMax) {
-        ok = false;
-        break;
-      }
-    }
-  }
-
-  if (ok) {
-    consecutive_bad_ = 0;
-    healthy_ = true;
-  } else {
-    ++bad_samples_total_;
-    if (consecutive_bad_ < kBadLimit) {
-      ++consecutive_bad_;
-    }
-    if (consecutive_bad_ >= kBadLimit) {
-      healthy_ = false;
-    }
-  }
+  return true;
 }

@@ -29,6 +29,7 @@
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "ins_all.hpp"
+#include "main.h"
 #include "motor.hpp"
 #include "pid.hpp"
 #include "robot.hpp"
@@ -37,10 +38,26 @@
 /* Private constants ---------------------------------------------------------*/
 /* Private types -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
+
+/**
+ * @brief 本次复位是否由独立看门狗触发（调试器里可直接观察）
+ *
+ * 验收时用它证明看门狗真的动作过：关掉遥控器 → 板子复位 → 重新连调试器，
+ * 读这个变量应为 true。比"看 LED 闪不闪"可靠得多（审计 F2 的建议）。
+ *
+ * 不加 static，保证在调试器的全局变量窗口里能按名字找到。
+ */
+volatile bool g_reset_by_iwdg = false;
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 void MainTaskInit(void) {
+  /* ---------- 0. 记录复位原因 ----------
+   * IWDG 复位会置位 RCC 的 IWDGRST 标志。读完之后清掉，
+   * 这样下一次复位还能被正确识别。 */
+  g_reset_by_iwdg = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET);
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
   /* ---------- 1. 电机：构造并配置 ID / 方向 / 减速比 ---------- */
   for (int i = 0; i < 4; ++i) {
     (void)GetMotorWheel(i);

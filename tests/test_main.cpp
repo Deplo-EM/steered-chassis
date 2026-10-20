@@ -281,8 +281,10 @@ void SetDbusChannel(uint8_t d[18], int index, uint16_t value)
     d[byte + 1] = static_cast<uint8_t>((word >> 8) & 0xFF);
     d[byte + 2] = static_cast<uint8_t>((word >> 16) & 0xFF);
   } else {
+    /* 拨轮是按 16 位整数解码的（DT7.cpp 用两个字节整体拼），
+     * 所以这里也必须写满 16 位，否则测不出高位被置脏的情况（审计 F1）。 */
     d[16] = static_cast<uint8_t>(value & 0xFF);
-    d[17] = static_cast<uint8_t>((value >> 8) & 0x07);
+    d[17] = static_cast<uint8_t>((value >> 8) & 0xFF);
   }
 }
 
@@ -354,6 +356,33 @@ void TestDbusCheck()
     SetDbusChannel(frame, 0, 364);
     SetDbusChannel(frame, 1, 1684);
     EXPECT_TRUE(IsDbusFrameValid(frame));
+  }
+
+  /* ---- 审计 F1：校验器与解码器位宽必须一致 ---- */
+  BeginCase("DBUS 校验：拨轮按 16 位参与范围检查（0xFC00 必须判非法）");
+  {
+    MakeValidDbusFrame(frame);
+    /* 低 11 位仍是 1024，但高 5 位被置脏。
+     * DT7 的解码器把两个字节当完整 16 位用，会算出
+     * (0xFC00 - 1024) / 660 ≈ 96.19，远超 [-1, 1]。
+     * 如果校验器只掩 11 位，这种帧会被放行 —— 审计 F1 指的就是这里。 */
+    frame[16] = 0x00;
+    frame[17] = 0xFC;
+    EXPECT_EQ(DbusChannel(frame, 4), 0xFC00u);
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+  }
+
+  BeginCase("DBUS 校验：拨轮正常值与越界值");
+  {
+    MakeValidDbusFrame(frame);
+    EXPECT_EQ(DbusChannel(frame, 4), 1024u);
+    EXPECT_TRUE(IsDbusFrameValid(frame));
+
+    SetDbusChannel(frame, 4, 1690);  // 超过上界
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
+
+    SetDbusChannel(frame, 4, 200);  // 低于下界
+    EXPECT_TRUE(!IsDbusFrameValid(frame));
   }
 }
 

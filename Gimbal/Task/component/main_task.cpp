@@ -22,6 +22,7 @@
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "ins_all.hpp"
+#include "main.h"
 #include "motor.hpp"
 #include "pid.hpp"
 #include "robot.hpp"
@@ -30,10 +31,23 @@
 /* Private constants ---------------------------------------------------------*/
 /* Private types -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
+
+/**
+ * @brief 本次复位是否由独立看门狗触发（调试器里可直接观察）
+ *
+ * 验收时用它证明看门狗真的动作过：关掉遥控器 → 板子复位 → 重新连调试器，
+ * 读这个变量应为 true。
+ */
+volatile bool g_reset_by_iwdg = false;
+
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 void MainTaskInit(void) {
+  /* ---------- 0. 记录复位原因 ---------- */
+  g_reset_by_iwdg = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET);
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
   /* ---------- 1. 两个达妙电机 ---------- */
   hello_world::motor::Motor* yaw_motor = GetMotorYaw();
   hello_world::motor::Motor* pitch_motor = GetMotorPitch();

@@ -47,8 +47,13 @@
 
 namespace {
 
-/** 是否启用看门狗喂狗（调车阶段可临时关掉；验收时必须为 true） */
-constexpr bool kWatchdogFeedEnable = true;
+/**
+ * @brief 调试模式：无条件喂狗
+ * @note  **正常情况下必须是 false**（只有控制周期跑完 + 遥控数据新鲜才喂）。
+ *        台架上需要连着调试器、又不接遥控器时，可以临时改成 true —— 此时
+ *        看门狗不再起保护作用，**绝不能用于实车控制**，验收前必须改回来。
+ */
+constexpr bool kDebugAlwaysFeedWatchdog = false;
 
 /** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
 constexpr uint32_t kDbusTimeoutMs = 100u;
@@ -144,7 +149,10 @@ void CommTask(void)
   }
 
   /* ---------- 3. 看门狗：整个周期都跑完了才喂 ---------- */
-  if (kWatchdogFeedEnable && RemoteAliveForWatchdog()) {
+  if (kDebugAlwaysFeedWatchdog) {
+    /* 调试模式：无条件喂（仅台架，绝不上车） */
+    HAL_IWDG_Refresh(&hiwdg);
+  } else if (RemoteAliveForWatchdog()) {
     HAL_IWDG_Refresh(&hiwdg);
   }
 }

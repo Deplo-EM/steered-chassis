@@ -61,6 +61,13 @@ constexpr float kImuSampleFreq = 1000.0f;
 constexpr float kImuMahonyKp = 1.0f;
 constexpr float kImuMahonyKi = 0.01f;
 
+/** 连续多少个异常采样判定为「不健康」（1kHz → 50ms） */
+constexpr uint16_t kImuBadSampleLimit = 50u;
+
+/** 恢复健康需要连续多少个正常采样（1kHz → 100ms）。
+ *  要求"连续好够久"才恢复，避免一次正常采样就宣布痊愈（审计 F3）。 */
+constexpr uint16_t kImuGoodSampleLimit = 100u;
+
 /** 默认安装矩阵：传感器坐标 = 车体坐标（x 前、y 左、z 上）。
  *  若 IMU 是倒装 / 转 90° 装的，改这个矩阵即可，不用动解算代码。 */
 constexpr float kImuDefaultRotMat[9] = {1.0f, 0.0f, 0.0f,
@@ -148,8 +155,8 @@ class Imu {
   uint32_t badSamples() const { return bad_samples_total_; }
 
  private:
-  /** 每周期更新健康状态 */
-  void updateHealth();
+  /** 本周期采样是否可信（有限值、加速度/角速度量级正常） */
+  bool IsSampleOk() const;
 
   BMI088 bmi_;         ///< 芯片驱动
   ahrs::Mahony ahrs_;  ///< 姿态解算
@@ -161,6 +168,7 @@ class Imu {
   /* 运行期健康状态 */
   bool healthy_ = false;          ///< 上电后要先采到合理数据才为 true
   uint16_t consecutive_bad_ = 0;  ///< 连续异常采样数
+  uint16_t consecutive_good_ = 0; ///< 连续正常采样数（用于恢复判定）
   uint32_t bad_samples_total_ = 0;
 
   /* 零漂标定累加器 */

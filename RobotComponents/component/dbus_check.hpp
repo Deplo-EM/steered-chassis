@@ -49,12 +49,16 @@ constexpr uint8_t kDbusFrameLen = 18u;
 /* Exported function prototypes ----------------------------------------------*/
 
 /**
- * @brief 取出第 index 个模拟通道的原始值（11 位）
+ * @brief 取出第 index 个模拟通道的原始值
  * @param data  18 字节 DBUS 数据
  * @param index 0=右横 1=右纵 2=左横 3=左纵 4=拨轮
- * @retval 0~2047 的原始值
- * @note   DBUS 是"按位紧密排列"的：通道 n 占第 n*11 位起的 11 位，
- *         所以要从任意 bit 偏移处跨字节取。拨轮单独在第 16~17 字节。
+ * @retval 前 4 个通道为 11 位（0~2047）；拨轮为 16 位原始值
+ * @note   ⚠️ 拨轮必须按 **16 位**取，不能掩成 11 位（审计 F1）：
+ *         DT7 的解码器写的是 `tmp = data[16] | (data[17] << 8)`，把两个字节
+ *         当成完整 16 位用。如果这里只掩低 11 位，那么一帧 `data[16..17] =
+ *         0xFC00` 的脏数据会「校验通过」，而解码出来的拨轮值高达
+ *         (0xFC00-1024)/660 ≈ 96，远超 [-1,1]，直接把底盘自旋目标推到几百 rad/s。
+ *         校验和解码必须读同一个宽度，否则校验就只是装饰。
  */
 inline uint16_t DbusChannel(const uint8_t data[18], int index)
 {
@@ -68,10 +72,9 @@ inline uint16_t DbusChannel(const uint8_t data[18], int index)
                           (static_cast<uint32_t>(data[byte + 2]) << 16);
     return static_cast<uint16_t>((word >> shift) & 0x07FFu);
   }
-  return static_cast<uint16_t>(
-      (static_cast<uint16_t>(data[16]) |
-       (static_cast<uint16_t>(data[17]) << 8)) &
-      0x07FFu);
+  /* 拨轮：与 DT7 解码器保持完全一致的 16 位 */
+  return static_cast<uint16_t>(static_cast<uint16_t>(data[16]) |
+                               (static_cast<uint16_t>(data[17]) << 8));
 }
 
 /**
