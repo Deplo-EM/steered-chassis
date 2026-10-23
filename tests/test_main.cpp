@@ -458,7 +458,17 @@ void TestIkSolver()
   using hello_world::chassis_ik_solver::WheelCommand;
   using robot::ChassisMotion;
 
-  Geometry geo;  /* 默认：R=0.052, hl=0.192, hw=0.155 */
+  Geometry geo;  /* 默认：R=0.066, hl=0.167, hw=0.167（考核说明书 6.2） */
+
+  BeginCase("几何参数与考核说明书 6.2 一致（防止手滑改错）");
+  {
+    /* 这一条不测算法，只"钉住"默认值：
+     * 下面的用例都用 geo 推导期望值，所以参数写错了它们也会全绿——
+     * 必须有一条独立的断言，把说明书里的数字固定下来。 */
+    EXPECT_NEAR(geo.wheel_radius, 0.066f, 1e-6f);
+    EXPECT_NEAR(geo.half_length, 0.167f, 1e-6f);
+    EXPECT_NEAR(geo.half_width, 0.167f, 1e-6f);
+  }
 
   BeginCase("逆解：纯前进（δ=0, vx=1）→ 四轮实际滚动速度都是 (1, 0)");
   {
