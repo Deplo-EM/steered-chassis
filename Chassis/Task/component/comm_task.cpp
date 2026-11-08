@@ -136,6 +136,8 @@ void CommTaskInit(void)
 
 void CommTask(void)
 {
+  // 不依赖错误中断是否开启，直接读取控制器的 bus-off 状态。
+  bool cycle_ok = !CAN_Is_BusOff(&hcan1) && !CAN_Is_BusOff(&hcan2);
   /* ---------- 故障注入：占满 CAN 发送邮箱 ----------
    * 连发 3 帧把 3 个邮箱占满，本周期真正的控制帧就会发送失败，
    * s_can_tx_fail_count 会增长。用来验证审计 H4 的"发送失败可检测"。 */
@@ -153,16 +155,18 @@ void CommTask(void)
     s_wheel_frame[i] = 0;
   }
   hello_world::motor::Motor* wheel0 = GetMotorWheel(0);
+  if (wheel0 == nullptr) cycle_ok = false;
   if (wheel0 != nullptr) {
     for (int i = 0; i < 4; ++i) {
       hello_world::motor::Motor* motor = GetMotorWheel(i);
       if (motor != nullptr) {
-        motor->encode(s_wheel_frame);
-      }
+        if (!motor->encode(s_wheel_frame)) cycle_ok = false;
+      } else { cycle_ok = false; }
     }
     if (!CAN_Send_Msg(&hcan1, s_wheel_frame,
                       hello_world::motor::M3508::GetTxId(wheel0->id()), 8)) {
       ++s_can_tx_fail_count;
+      cycle_ok = false;
     }
   }
 
@@ -171,27 +175,31 @@ void CommTask(void)
     s_steer_frame[i] = 0;
   }
   hello_world::motor::Motor* steer0 = GetMotorSteer(0);
+  if (steer0 == nullptr) cycle_ok = false;
   if (steer0 != nullptr) {
     for (int i = 0; i < 4; ++i) {
       hello_world::motor::Motor* motor = GetMotorSteer(i);
       if (motor != nullptr) {
-        motor->encode(s_steer_frame);
-      }
+        if (!motor->encode(s_steer_frame)) cycle_ok = false;
+      } else { cycle_ok = false; }
     }
     if (!CAN_Send_Msg(&hcan2, s_steer_frame,
                       hello_world::motor::GM6020::GetTxId(
                           steer0->id(), steer0->get_input_type()),
                       8)) {
       ++s_can_tx_fail_count;
+      cycle_ok = false;
     }
   }
 
   /* ---------- 3. 双板通信帧 ---------- */
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
+  if (comm == nullptr) cycle_ok = false;
   if (comm != nullptr) {
     comm->encode(s_comm_frame);
     if (!CAN_Send_Msg(&hcan1, s_comm_frame, comm->tx_id(), 8)) {
       ++s_can_tx_fail_count;
+      cycle_ok = false;
     }
   }
 
@@ -199,8 +207,11 @@ void CommTask(void)
    * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
    * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。
    * 全板**只有这一个**喂狗调用点。 */
-  const bool should_feed =
-      kDebugAlwaysFeedWatchdog /* 仅台架调试用 */ || RemoteAliveForWatchdog();
+  robot::Robot* controller = GetRobot();
+  if (controller != nullptr) controller->notifyCanTxCycle(cycle_ok);
+  // 连续 10 ms 失败停止喂狗；恢复前仅尝试零输出。HAL_OK 不等于送达。
+  const bool should_feed = kDebugAlwaysFeedWatchdog ||
+      (controller != nullptr && controller->canFeedWatchdog() && RemoteAliveForWatchdog());
   if (should_feed) {
     HAL_IWDG_Refresh(&hiwdg);
   }

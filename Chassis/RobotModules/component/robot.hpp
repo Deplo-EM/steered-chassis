@@ -38,6 +38,7 @@
 #include <cstdint>
 
 #include "module_state.hpp"
+#include "can_tx_guard.hpp"
 #include "offline_checker.hpp"
 
 namespace hello_world {
@@ -88,6 +89,12 @@ class Robot {
   /** 收到某号电机的反馈帧时调用（HW_can.cpp 的分发里） */
   void notifyMotorRx(int slot);
 
+  /** CommTask 完成全部关键帧后报告；失败立即清零，恢复需有效急停确认。 */
+  void notifyCanTxCycle(bool success);
+  bool canTxHealthy() const { return can_tx_guard_.healthy(); }
+  bool canFeedWatchdog() const { return can_tx_guard_.canFeedWatchdog(); }
+  uint32_t canTxFailedCycles() const { return can_tx_guard_.failedCycles(); }
+
   /* ---------------- 状态查询（调试 / 上层判断） ---------------- */
 
   LifeState lifeState() const { return state_; }
@@ -131,10 +138,12 @@ class Robot {
   LifeState state_ = LifeState::kDead;
   uint32_t state_enter_tick_ = 0;
   bool initialized_ = false;
+  CanTxGuard can_tx_guard_;
 
   /* 指令 */
   ChassisMode mode_ = ChassisMode::kSeparate;
   bool estop_ = false;
+  bool remote_armed_ = false;  ///< 上电/遥控失联/发送失败后需本地急停确认
   ChassisMotion ramped_;  ///< 加速度限幅后的云台系速度指令
   float gimbal_yaw_rate_ = 0.0f;
   float gimbal_pitch_target_ = 0.0f;

@@ -60,6 +60,7 @@ void robot::Robot::init()
   state_ = LifeState::kDead;
   state_enter_tick_ = hello_world::tick::GetTickMs();
   estop_ = false;
+  can_tx_guard_ = CanTxGuard{};
   yaw_target_world_ = 0.0f;
   output_enabled_prev_ = false;
   initialized_ = (rc_ != nullptr) && (imu_ != nullptr) && (gimbal_ != nullptr) &&
@@ -93,6 +94,20 @@ void robot::Robot::update()
 void robot::Robot::notifyRemoteRx()
 {
   rc_checker_.update();
+}
+
+void robot::Robot::notifyCanTxCycle(bool success)
+{
+  if (!initialized_) return;
+  const bool reset_ack = (comm_ != nullptr) && !comm_->isOffline() &&
+      comm_->chassis_data().dbus_online && comm_->chassis_data().estop;
+  can_tx_guard_.update(success, reset_ack, hello_world::tick::GetTickMs());
+  if (!can_tx_guard_.healthy()) {
+    enterState(LifeState::kDead);
+    gimbal_->stop();
+    output_enabled_prev_ = false;
+    updateCommData();
+  }
 }
 
 void robot::Robot::notifyMotorRx(int slot)
@@ -139,9 +154,9 @@ void robot::Robot::updateStateMachine()
   const bool comm_ok = (comm_ != nullptr) && !comm_->isOffline();
   /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
   const bool imu_ok =
-      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
+      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   const bool motors_ok = areAllMotorsOnline();
-  const bool all_ok = comm_ok && imu_ok && motors_ok;
+  const bool all_ok = comm_ok && imu_ok && motors_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();
 
@@ -203,10 +218,10 @@ void robot::Robot::applyOutput(float dt)
     return;
   }
 
-  /* 底盘板是否允许本板出力。
-   * 注意这里不用 chassis_data().working 单独判断：gimbal_enable 本身
-   * 就是「底盘 Working 且未急停」的组合结果。 */
-  const bool enabled = comm_->chassis_data().gimbal_enable;
+  /* 接收端独立核对授权条件，不能只信任对板的一个 enable 位。 */
+  const auto command = comm_->chassis_data();
+  const bool enabled = command.alive && command.working && command.dbus_online &&
+                       command.imu_ready && command.gimbal_enable && !command.estop;
   if (!enabled) {
     gimbal_->stop();
     output_enabled_prev_ = false;
@@ -225,12 +240,13 @@ void robot::Robot::applyOutput(float dt)
    * 底盘板下发的是「转多快」（rad/s），这里积分成世界系目标角。
    * 为什么不直接让它下发角度：世界角只有持有 IMU 的本板才能定义，
    * 详见 gimbal_chassis_comm.hpp 的说明。 */
-  const float yaw_rate = comm_->chassis_data().yaw_rate;
-  yaw_target_world_ += yaw_rate * dt;
+  const float yaw_rate = command.yaw_rate;
+  // 目标与反馈都是周期角；每周期归一化，避免长时间连续自旋丢失 float 小增量。
+  yaw_target_world_ = robot::WrapPi(yaw_target_world_ + yaw_rate * dt);
   gimbal_->setYawWorldTarget(yaw_target_world_);
 
   /* ---------- pitch：直接采用底盘下发的关节角目标（模块内部再限位） ---------- */
-  gimbal_->setPitchTarget(comm_->chassis_data().pitch_target);
+  gimbal_->setPitchTarget(command.pitch_target);
 
   /* ---------- 闭环 ---------- */
   gimbal_->update(dt, imu_->yaw());
@@ -243,9 +259,11 @@ void robot::Robot::updateCommData()
   }
   GimbalChassisComm::GimbalData& d = comm_->gimbal_data();
   d.working = (state_ == LifeState::kWorking);
-  d.estop = estop_;
+  // 只回传本地急停；C2G 的组合急停不能回显，否则两板会互相锁住急停。
+  d.estop = isRemoteOnline() && rc_ != nullptr &&
+            rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown;
   d.dbus_online = isRemoteOnline();
-  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   d.pitch_at_limit = gimbal_->pitchAtLimit();
   d.yaw_joint = gimbal_->yawJoint();
   d.pitch_joint = gimbal_->pitchJoint();

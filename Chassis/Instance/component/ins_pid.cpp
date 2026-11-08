@@ -41,7 +41,7 @@ constexpr float kSteerPidKp = 10000.0f;  ///< raw / rad
 constexpr float kSteerPidKi = 2000.0f;   ///< raw / (rad·s)
 constexpr float kSteerPidKd = 150.0f;    ///< raw / (rad/s)
 constexpr float kSteerPidOutLim = 20000.0f;    ///< 电压限幅
-constexpr float kSteerPidIntegralLim = 2000.0f;  ///< 积分限幅（等效最多 2000 raw）
+constexpr float kSteerPidIntegralLim = 1.0f;  ///< 积分状态限幅 rad·s，Ki×限幅=2000 raw
 
 hello_world::pid::Pid s_wheel_pids[4];
 hello_world::pid::Pid s_steer_pids[4];

@@ -56,9 +56,9 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::init(
     float steer_flip_margin)
 {
   geo_ = geo;
-  max_steer_rate_ = (max_steer_rate > 0.0f) ? max_steer_rate : 10.0f;
-  max_wheel_speed_ = (max_wheel_speed > 0.0f) ? max_wheel_speed : 3.0f;
-  steer_flip_margin_ = (steer_flip_margin >= 0.0f) ? steer_flip_margin : 0.0f;
+  max_steer_rate_ = max_steer_rate;
+  max_wheel_speed_ = max_wheel_speed;
+  steer_flip_margin_ = steer_flip_margin;
   reset(nullptr);
 }
 
@@ -67,12 +67,11 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::reset(
 {
   for (int i = 0; i < kWheelNum; ++i) {
     command_[i] = WheelCommand{};
-    if (steer_now != nullptr) {
-      last_angle_[i] = steer_now[i];
-    }
+    last_angle_[i] = (steer_now != nullptr && std::isfinite(steer_now[i])) ? steer_now[i] : 0.0f;
   }
   has_last_ = (steer_now != nullptr);
   chassis_motion_.reset();
+  last_solve_valid_ = false;
 }
 
 float hello_world::chassis_ik_solver::ChassisIkSolver::wheelPosX(int index) const
@@ -109,8 +108,24 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
     const robot::ChassisMotion& motion, float delta,
     const float steer_now[kWheelNum], float dt, WheelCommand out[kWheelNum])
 {
-  if (dt <= 0.0f) {
-    dt = 0.001f;
+  auto reject = [&]() {
+    reset();
+    if (out != nullptr) for (int i = 0; i < kWheelNum; ++i) out[i] = WheelCommand{};
+  };
+  if (out == nullptr || !std::isfinite(dt) || dt <= 0.0f ||
+      !std::isfinite(delta) || !std::isfinite(motion.vx) ||
+      !std::isfinite(motion.vy) || !std::isfinite(motion.w) ||
+      !std::isfinite(geo_.wheel_radius) || geo_.wheel_radius <= 0.0f ||
+      !std::isfinite(geo_.half_length) || geo_.half_length <= 0.0f ||
+      !std::isfinite(geo_.half_width) || geo_.half_width <= 0.0f ||
+      !std::isfinite(max_steer_rate_) || max_steer_rate_ <= 0.0f ||
+      !std::isfinite(max_wheel_speed_) || max_wheel_speed_ <= 0.0f ||
+      !std::isfinite(steer_flip_margin_) || steer_flip_margin_ < 0.0f ||
+      !std::isfinite(max_steer_rate_ * dt)) {
+    reject(); return;
+  }
+  for (int i = 0; i < kWheelNum; ++i) {
+    if (steer_now != nullptr && !std::isfinite(steer_now[i])) { reject(); return; }
   }
 
   /* ---------- 第 1 步：云台系 → 车体系 ----------
@@ -132,8 +147,7 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
    *   本工程以物理正确性为准，并用单测锁定（见 tests/test_main.cpp 的
    *   「云台在车头左侧 90°」与「小陀螺世界方向不变」两个用例）。
    *
-   * 🔧 如果实车装出来发现「转云台后推杆，车往反方向走」，只需要把下面两行的
-   *   sin 项符号同时取反（并把单测期望值一起改），不要动其它地方。 */
+   * 实车方向异常时先核对 yaw 正方向、零点和电机方向；坐标定义变更需同步推导与测试。 */
   const float cos_d = std::cos(delta);
   const float sin_d = std::sin(delta);
   const float vx_c = motion.vx * cos_d - motion.vy * sin_d;
@@ -142,6 +156,7 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
   chassis_motion_.vy = vy_c;
   chassis_motion_.w = motion.w;
 
+  float max_speed = 0.0f;
   /* ---------- 第 2~4 步：逐个轮组 ---------- */
   for (int i = 0; i < kWheelNum; ++i) {
     const float x_i = wheelPosX(i);
@@ -153,6 +168,8 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
     /* magnitude 一定为正：它是「轮子该转多快」；
      * sign 单独保存方向，等效解翻转时只翻 sign，不影响「是否低速」的判断。 */
     float magnitude = std::sqrt(v_ix * v_ix + v_iy * v_iy);
+    if (!std::isfinite(magnitude)) { reject(); return; }
+    if (magnitude > max_speed) max_speed = magnitude;
     float sign = 1.0f;
     float angle = std::atan2(v_iy, v_ix);
 
@@ -178,6 +195,9 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
       diff = robot::WrapPi(angle - reference);
     }
 
+    // 最终等效角与限速后的伺服目标必须分开，驱动门不能拿小步进角当已对齐。
+    float desired_angle = reference + diff;
+
     /* ---- 速率限幅：目标角每周期最多变化 max_steer_rate*dt ----
      * 注意是在「连续角」上做限幅，这样目标不会绕远路。 */
     const float max_step = max_steer_rate_ * dt;
@@ -193,26 +213,30 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
     if (magnitude <= kSpeedDeadband) {
       speed = 0.0f;
       angle = has_last_ ? last_angle_[i] : reference;
+      desired_angle = angle;
     } else {
       angle = reference + diff;
       speed = sign * magnitude;
     }
 
-    /* ---- 轮速限幅 ---- */
-    if (speed > max_wheel_speed_) {
-      speed = max_wheel_speed_;
-    } else if (speed < -max_wheel_speed_) {
-      speed = -max_wheel_speed_;
-    }
+    if (!std::isfinite(angle) || !std::isfinite(desired_angle)) { reject(); return; }
 
     /* ---- 记录 ---- */
     last_angle_[i] = angle;
     command_[i].speed = speed;
     command_[i].angle = angle;
+    command_[i].desired_angle = desired_angle;
     out[i] = command_[i];
   }
 
+  // 四轮统一缩放，保持刚体速度的比例关系和瞬时旋转中心。
+  const float scale = max_speed > max_wheel_speed_ ? max_wheel_speed_ / max_speed : 1.0f;
+  for (int i = 0; i < kWheelNum; ++i) {
+    command_[i].speed *= scale;
+    out[i] = command_[i];
+  }
   has_last_ = true;
+  last_solve_valid_ = true;
 }
 
 /* Private function definitions ----------------------------------------------*/

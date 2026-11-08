@@ -50,9 +50,12 @@ void robot::Gimbal::init(hello_world::motor::Motor* yaw_motor,
 
 void robot::Gimbal::setPitchTarget(float pitch_joint)
 {
-  /* 软件限位：先钳位再记录「是否顶到限位」。
-   * 注意是「钳位目标」而不是「到限位就断电」——钳住之后电机仍然出力顶住，
-   * 这样枪口停在限位上不会往下掉。 */
+  if (!std::isfinite(pitch_joint)) {
+    pitch_target_ = pitch_joint;  // 保留无效标记，由 update 整组停机。
+    return;
+  }
+  /* 先限制目标角，避免要求越过软件行程；update 还会按实测角阻止外向力矩。
+   * 是否能安全保持姿态、机械边界需要多少制动余量，须通过台架确认。 */
   const float clamped =
       robot::Clamp(pitch_joint, kPitchLowerLimit, kPitchUpperLimit);
   pitch_target_ = clamped;
@@ -67,16 +70,38 @@ void robot::Gimbal::update(float dt, float yaw_world_meas)
     return;
   }
 
+  // 任一轴反馈或目标异常时整组停机，禁止 NaN 进入 PID 或电机的整数编码。
+  // 目标保留异常标记，调用方必须给出新的有效目标才可恢复。
+  if (!std::isfinite(dt) || dt <= 0.0f || !std::isfinite(yaw_world_meas) ||
+      !std::isfinite(yaw_target_) || !std::isfinite(pitch_target_) ||
+      !std::isfinite(yawJoint()) || !std::isfinite(pitchJoint())) {
+    stop();
+    return;
+  }
+
   /* ---------- yaw：世界角误差 → 力矩 ----------
    * 误差必须先归一化到 ±π：云台可以连续转 360°，如果直接拿 359° 和 1° 相减，
    * 控制器会以为要倒转 358°，电机就会「啪」地反向甩一大圈。 */
   const float yaw_err = robot::WrapPi(yaw_target_ - yaw_world_meas);
-  yaw_motor_->setInput(yaw_pid_->updateError(yaw_err, dt));
+  const float yaw_input = yaw_pid_->updateError(yaw_err, dt);
 
   /* ---------- pitch：关节角误差 → 力矩 ----------
    * pitch 行程小（±1 rad 以内），不存在回绕问题，直接相减。 */
   const float pitch_err = pitch_target_ - pitchJoint();
-  pitch_motor_->setInput(pitch_pid_->updateError(pitch_err, dt));
+  float pitch_input = pitch_pid_->updateError(pitch_err, dt);
+  if (!std::isfinite(yaw_input) || !std::isfinite(pitch_input)) {
+    stop();
+    return;
+  }
+  // 反馈到达软件边界后禁止向外顶住；清积分避免多周期反复施加外向力矩。
+  // 允许向内脱离边界；机械限位必须仍留出制动距离并在台架标定。
+  if ((pitchJoint() >= kPitchUpperLimit && pitch_input > 0.0f) ||
+      (pitchJoint() <= kPitchLowerLimit && pitch_input < 0.0f)) {
+    pitch_pid_->reset();
+    pitch_input = 0.0f;
+  }
+  yaw_motor_->setInput(yaw_input);
+  pitch_motor_->setInput(pitch_input);
 }
 
 void robot::Gimbal::stop()

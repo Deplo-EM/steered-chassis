@@ -81,65 +81,55 @@ void robot::Chassis::update(float dt)
     return;
   }
 
-  /* ---------- 1. 逆解：速度指令 → 每个轮组的 (舵角, 轮速) ---------- */
-  float steer_now[kWheelNum];
+  // 先读取并检查整组反馈，再算全部输出；任一数值异常都不能只停一只轮。
+  float steer_now[kWheelNum], wheel_velocity[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
     steer_now[i] = steers_[i]->angle();
+    wheel_velocity[i] = wheels_[i]->vel();
+    if (!std::isfinite(steer_now[i]) || !std::isfinite(wheel_velocity[i])) {
+      stop(); return;
+    }
   }
-
   hello_world::chassis_ik_solver::WheelCommand cmd[kWheelNum];
   solver_->solve(motion_, delta_, steer_now, dt, cmd);
+  if (!solver_->lastSolveValid()) { stop(); return; }
 
-  /* ---------- 2. 逐个轮组闭环 ---------- */
   const float radius = solver_->geometry().wheel_radius;
-
+  float current[kWheelNum], voltage[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
-    /* 舵角误差：目标角是「连续角」，反馈是 [−π, π)，所以必须归一化差值 */
     const float steer_err = robot::WrapPi(cmd[i].angle - steer_now[i]);
-
-    /* 舵角没到位就先不给轮子出力（详见 hpp 里的说明）。
-     * 到位后按 cos(误差) 缩放：轮子斜着走时，它对「车身前进」的有效分量只有
-     * cos 那么多，提前缩一点能让起步更平顺。 */
-    float align = 1.0f;
-    const float abs_err = std::fabs(steer_err);
-    if (abs_err > kSteerReadyAngle) {
-      align = 0.0f;
+    const float drive_err = robot::WrapPi(cmd[i].desired_angle - steer_now[i]);
+    if (std::fabs(drive_err) > kSteerReadyAngle) {
+      // 未到最终方向时直接撤销驱动力和旧积分；只把轮速目标设零仍会残留积分出力。
+      wheel_pids_[i]->reset();
+      current[i] = 0.0f;
     } else {
-      align = std::cos(steer_err);
+      // 目标沿实测滚动方向投影，减轻小角度未对齐时的轮胎侧向拖拽。
+      const float omega_target = cmd[i].speed / radius * std::cos(drive_err);
+      current[i] = wheel_pids_[i]->update(omega_target, wheel_velocity[i], dt);
     }
-
-    /* 轮速环：目标角速度 = 线速度 / 轮半径 */
-    const float omega_target = (cmd[i].speed / radius) * align;
-    const float current =
-        wheel_pids_[i]->update(omega_target, wheels_[i]->vel(), dt);
-    wheels_[i]->setInput(current);
-
-    /* 舵角环：角度误差 → 电压。用 updateError 是为了把我们算好的
-     * （已经归一化过的）误差直接送进去，避免 PID 内部再做一次减法。 */
-    const float voltage = steer_pids_[i]->updateError(steer_err, dt);
-    steers_[i]->setInput(voltage);
+    voltage[i] = steer_pids_[i]->updateError(steer_err, dt);
+    if (!std::isfinite(current[i]) || !std::isfinite(voltage[i])) { stop(); return; }
+  }
+  for (int i = 0; i < kWheelNum; ++i) {
+    wheels_[i]->setInput(current[i]);
+    steers_[i]->setInput(voltage[i]);
   }
 }
 
 void robot::Chassis::stop()
 {
-  if (!ready_) {
-    return;
-  }
   motion_.reset();
   delta_ = 0.0f;
-
-  float steer_now[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
-    wheels_[i]->setInput(0.0f);
-    steers_[i]->setInput(0.0f);
-    /* reset 时把「上次反馈」设成当前值：否则恢复的瞬间会因误差突变产生
-     * 一个巨大的微分尖峰（电机「抽」一下）。 */
-    wheel_pids_[i]->reset(wheels_[i]->vel());
-    steer_pids_[i]->reset(steers_[i]->angle());
-    steer_now[i] = steers_[i]->angle();
+    if (wheels_[i]) wheels_[i]->setInput(0.0f);
+    if (steers_[i]) steers_[i]->setInput(0.0f);
+    // reset 后首帧跳过微分；不把失效反馈存进控制历史。
+    if (wheel_pids_[i]) wheel_pids_[i]->reset();
+    if (steer_pids_[i]) steer_pids_[i]->reset();
   }
-  solver_->reset(steer_now);
+  // 清历史，下一次 solve 从当时实测舵角开始，允许停机期间手动转动舵轮。
+  if (solver_) solver_->reset();
 }
 
 /* Private function definitions ----------------------------------------------*/

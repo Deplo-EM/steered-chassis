@@ -30,6 +30,7 @@
 #include <cstdint>
 
 #include "module_state.hpp"
+#include "can_tx_guard.hpp"
 #include "offline_checker.hpp"
 
 namespace hello_world {
@@ -72,6 +73,12 @@ class Robot {
   void notifyRemoteRx();
   void notifyMotorRx(int slot);
 
+  /** CommTask 完成全部关键帧后报告；失败立即清零，恢复需有效急停确认。 */
+  void notifyCanTxCycle(bool success);
+  bool canTxHealthy() const { return can_tx_guard_.healthy(); }
+  bool canFeedWatchdog() const { return can_tx_guard_.canFeedWatchdog(); }
+  uint32_t canTxFailedCycles() const { return can_tx_guard_.failedCycles(); }
+
   /* ---------------- 状态查询 ---------------- */
   LifeState lifeState() const { return state_; }
   bool isEstopped() const { return estop_; }
@@ -97,9 +104,10 @@ class Robot {
   LifeState state_ = LifeState::kDead;
   uint32_t state_enter_tick_ = 0;
   bool initialized_ = false;
+  CanTxGuard can_tx_guard_;
 
   bool estop_ = false;
-  /** yaw 世界系目标（连续累加，不做归一化） */
+  /** yaw 世界系目标（每周期归一化至 [-pi, pi)，误差也按最短角计算） */
   float yaw_target_world_ = 0.0f;
   /** 上一周期是否处于「允许出力」状态，用于检测使能上升沿 */
   bool output_enabled_prev_ = false;

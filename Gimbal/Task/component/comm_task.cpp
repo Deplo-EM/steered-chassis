@@ -132,6 +132,8 @@ void CommTaskInit(void)
 
 void CommTask(void)
 {
+  // 不依赖错误中断是否开启，直接读取控制器的 bus-off 状态。
+  bool cycle_ok = !CAN_Is_BusOff(&hcan1) && !CAN_Is_BusOff(&hcan2);
   /* ---------- 故障注入：占满 CAN2 发送邮箱（达妙在 CAN2） ---------- */
   if (robot::FaultActive(robot::FaultId::kCanTxStarve)) {
     static uint8_t dummy[8] = {0};
@@ -142,24 +144,31 @@ void CommTask(void)
   /* ---------- 1. 两个达妙电机：各自一帧，ID 不同，不能合并 ---------- */
   if (!SendDamiaoFrame(GetMotorYaw(), s_yaw_frame)) {
     ++s_can_tx_fail_count;
+    cycle_ok = false;
   }
   if (!SendDamiaoFrame(GetMotorPitch(), s_pitch_frame)) {
     ++s_can_tx_fail_count;
+    cycle_ok = false;
   }
 
   /* ---------- 2. 双板通信帧（走 CAN1） ---------- */
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
+  if (comm == nullptr) cycle_ok = false;
   if (comm != nullptr) {
     comm->encode(s_comm_frame);
     if (!CAN_Send_Msg(&hcan1, s_comm_frame, comm->tx_id(), 8)) {
       ++s_can_tx_fail_count;
+      cycle_ok = false;
     }
   }
 
   /* ---------- 3. 看门狗：整个周期都跑完了才喂 ----------
    * 全板**只有这一个**喂狗调用点。 */
-  const bool should_feed =
-      kDebugAlwaysFeedWatchdog /* 仅台架调试用 */ || RemoteAliveForWatchdog();
+  robot::Robot* controller = GetRobot();
+  if (controller != nullptr) controller->notifyCanTxCycle(cycle_ok);
+  // 连续 10 ms 失败停止喂狗；恢复前仅尝试零输出。HAL_OK 不等于送达。
+  const bool should_feed = kDebugAlwaysFeedWatchdog ||
+      (controller != nullptr && controller->canFeedWatchdog() && RemoteAliveForWatchdog());
   if (should_feed) {
     HAL_IWDG_Refresh(&hiwdg);
   }

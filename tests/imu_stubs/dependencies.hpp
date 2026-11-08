@@ -1,0 +1,39 @@
+#pragma once
+// 只替代芯片访问和姿态解算依赖，imu.hpp / imu.cpp 使用每块板的实际源码。
+// 提前声明相同 include guard，避免测试依赖 STM32 HAL / CMSIS。
+#define HW_COMPONENTS_DEVICES_IMU_BMI088_HPP_
+#define HW_COMPONENTS_ALGORITHMS_AHRS_MAHONY_HPP_
+#include <cstdint>
+#include <cstring>
+namespace imu_test {
+inline float acc[3] = {0.0f, 0.0f, 9.8f};
+inline float gyro[3] = {0.1f, -0.2f, 0.3f};
+inline float temperature = 25.0f;
+inline bool init_ok = true;
+inline int ahrs_updates = 0;
+}
+namespace hello_world::imu {
+struct BMI088HWConfig {};
+struct BMI088Config {};
+enum BMI088ErrState : uint8_t { kBMI088ErrStateNoErr = 0, kBMI088ErrStateAccNotFound = 1 };
+class BMI088 {
+ public:
+  void init(const BMI088HWConfig&, const float[9], const BMI088Config&) {}
+  BMI088ErrState imuInit(bool) { return imu_test::init_ok ? kBMI088ErrStateNoErr : kBMI088ErrStateAccNotFound; }
+  void getData(float acc[3], float gyro[3], float* temperature) const {
+    std::memcpy(acc, imu_test::acc, sizeof(imu_test::acc));
+    std::memcpy(gyro, imu_test::gyro, sizeof(imu_test::gyro));
+    *temperature = imu_test::temperature;
+  }
+};
+}
+namespace hello_world::ahrs {
+class Mahony {
+ public:
+  void init(float, float, float) { yaw_ = 0.0f; }
+  void update(const float[3], const float gyro[3]) { ++imu_test::ahrs_updates; yaw_ += gyro[2] * 0.001f; }
+  void getEulerAngle(float euler[3]) const { euler[0] = euler[1] = 0.0f; euler[2] = yaw_; }
+ private:
+  float yaw_ = 0.0f;
+};
+}

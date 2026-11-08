@@ -80,6 +80,8 @@ struct WheelCommand {
    *  @note 这是「连续角」，可能超出 ±π（例如累计转到 4.2 rad）。
    *        连续的好处是：目标不会在 ±π 处跳变，PID 和速率限幅都好处理。 */
   float angle = 0.0f;
+  /** 未限速的最终等效舵角(rad)，用于判断驱动轮实际方向是否对齐。 */
+  float desired_angle = 0.0f;
 };
 
 /**
@@ -136,6 +138,8 @@ class ChassisIkSolver {
     return command_[(index < 0 || index >= kWheelNum) ? 0 : index];
   }
 
+  bool lastSolveValid() const { return last_solve_valid_; }
+
   const Geometry& geometry() const { return geo_; }
   const robot::ChassisMotion& chassis_motion() const { return chassis_motion_; }
 
@@ -153,6 +157,7 @@ class ChassisIkSolver {
   /** 上一次的舵角目标（连续角），用于速率限幅与等效解选择 */
   float last_angle_[kWheelNum] = {0.0f, 0.0f, 0.0f, 0.0f};
   bool has_last_ = false;
+  bool last_solve_valid_ = false;
 
   /** 最近一次使用的车体系速度（调试用） */
   robot::ChassisMotion chassis_motion_;

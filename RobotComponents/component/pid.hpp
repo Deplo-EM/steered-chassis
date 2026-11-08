@@ -71,15 +71,14 @@ class Pid {
     reset();
   }
 
-  /** 清空积分与微分历史。
-   *  @param measure 可选：把「上一次反馈值」设为当前值，避免 reset 后第一帧
-   *                 因误差突变产生一个巨大的微分尖峰。 */
+  /** 清空积分与微分历史，首帧跳过差分以免产生微分尖峰。
+   *  @param measure 仅为调用兼容保留，不参与计算；微分使用误差历史。 */
   void reset(float measure = 0.0f)
   {
     integral_ = 0.0f;
     last_error_ = 0.0f;
     d_filtered_ = 0.0f;
-    last_measure_ = measure;
+    (void)measure;
     output_ = 0.0f;
     first_run_ = true;
   }
@@ -103,8 +102,11 @@ class Pid {
    */
   float updateError(float error, float dt)
   {
-    if (dt <= 0.0f) {
-      return output_;
+    if (!std::isfinite(error) || !std::isfinite(dt) || dt <= 0.0f ||
+        !std::isfinite(kp_) || !std::isfinite(ki_) || !std::isfinite(kd_) ||
+        !std::isfinite(out_lim_) || !std::isfinite(i_lim_)) {
+      reset();
+      return 0.0f;
     }
 
     /* ---- 微分项：对误差差分，再做一阶低通 ----
@@ -117,6 +119,7 @@ class Pid {
     d_filtered_ += d_lpf_ * (d_raw - d_filtered_);
 
     /* ---- 积分项：先累加，再限幅 ---- */
+    const float previous_integral = integral_;
     integral_ += error * dt;
     if (integral_ > i_lim_) {
       integral_ = i_lim_;
@@ -128,10 +131,17 @@ class Pid {
 
     /* ---- 抗饱和（条件积分）：输出已饱和且误差仍在把输出往饱和方向推时，
      *      撤销本次积分，防止「越顶越积」。 ---- */
-    if ((out > out_lim_ && error > 0.0f) ||
-        (out < -out_lim_ && error < 0.0f)) {
-      integral_ -= error * dt;
+    const float integral_push = ki_ * (integral_ - previous_integral);
+    if ((out > out_lim_ && integral_push > 0.0f) ||
+        (out < -out_lim_ && integral_push < 0.0f)) {
+      // 限幅后的积分不能减回 error*dt；直接恢复保存值，避免越过积分下限。
+      integral_ = previous_integral;
       out = kp_ * error + ki_ * integral_ + kd_ * d_filtered_;
+    }
+
+    if (!std::isfinite(out) || !std::isfinite(integral_) || !std::isfinite(d_filtered_)) {
+      reset();
+      return 0.0f;
     }
 
     /* ---- 输出限幅 ---- */
@@ -155,7 +165,14 @@ class Pid {
     kd_ = kd;
   }
   void setOutputLimit(float out_lim) { out_lim_ = std::fabs(out_lim); }
-  void setIntegralLimit(float i_lim) { i_lim_ = std::fabs(i_lim); }
+  void setIntegralLimit(float i_lim)
+  {
+    i_lim_ = std::fabs(i_lim);
+    // 在线缩小限幅时立即收紧状态，否则下一次抗饱和可能回滚到旧的越界积分。
+    if (!std::isfinite(i_lim_)) integral_ = 0.0f;
+    else if (integral_ > i_lim_) integral_ = i_lim_;
+    else if (integral_ < -i_lim_) integral_ = -i_lim_;
+  }
   /** 微分低通系数，范围 (0, 1]，1 表示不滤波 */
   void setDerivativeLpf(float alpha)
   {
@@ -178,10 +195,9 @@ class Pid {
   float out_lim_ = 0.0f;
   float i_lim_ = 0.0f;
 
-  float integral_ = 0.0f;    ///< 误差积分
+  float integral_ = 0.0f;    ///< 误差×s；积分输出为 ki_ * integral_
   float last_error_ = 0.0f;  ///< 上一周期误差（用于差分）
   float d_filtered_ = 0.0f;  ///< 低通后的微分值
-  float last_measure_ = 0.0f;
   float output_ = 0.0f;
 
   float d_lpf_ = 0.15f;  ///< 微分一阶低通系数

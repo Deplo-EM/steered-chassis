@@ -37,6 +37,9 @@ extern "C" {
  */
 void CanFilter_Init(CAN_HandleTypeDef *hcan);
 
+/** 实时读取硬件 bus-off 位；不依赖 HAL 错误中断是否开启。 */
+bool CAN_Is_BusOff(const CAN_HandleTypeDef *hcan);
+
 /**
  * @brief       向 CAN 总线发送一帧标准帧
  * @param       hcan: CAN 句柄

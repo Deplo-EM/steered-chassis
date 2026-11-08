@@ -15,6 +15,7 @@
 #include "imu.hpp"
 
 #include <cmath>
+#include <limits>
 
 /* Private constants ---------------------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
@@ -23,6 +24,8 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
                                  const float rot_mat_flatten[9],
                                  const BMI088Config& config)
 {
+  inited_ = false;
+  restartCalibration();
   bmi_.init(hw_config, rot_mat_flatten, config);
 
   /* imuInit 内部会做「读芯片 ID + 配置寄存器 + 可选自检」，成功返回 0。
@@ -42,6 +45,10 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
 void hello_world::imu::Imu::restartCalibration()
 {
   calibrated_ = false;
+  sample_valid_ = false;
+  healthy_ = false;
+  consecutive_bad_ = consecutive_good_ = 0;
+  gyro_bias_removed_[0] = gyro_bias_removed_[1] = gyro_bias_removed_[2] = 0.0f;
   samples_ = 0;
   gyro_sum_[0] = gyro_sum_[1] = gyro_sum_[2] = 0.0f;
   gyro_bias_[0] = gyro_bias_[1] = gyro_bias_[2] = 0.0f;
@@ -51,12 +58,18 @@ void hello_world::imu::Imu::restartCalibration()
 
 void hello_world::imu::Imu::update()
 {
+  sample_valid_ = false;
   if (!inited_) {
     return;
   }
 
   /* ---------- 1. 读芯片 ---------- */
-  bmi_.getData(acc_, gyro_bias_removed_, &temperature_);
+  // 候选样本通过整帧校验后才能发布；坏样本不污染控制可见的上一帧数据。
+  constexpr float invalid = std::numeric_limits<float>::quiet_NaN();
+  float sample_acc[3] = {invalid, invalid, invalid};
+  float sample_gyro[3] = {invalid, invalid, invalid};
+  float sample_temperature = invalid;
+  bmi_.getData(sample_acc, sample_gyro, &sample_temperature);
 
   /* ---------- 1.5 运行期健康检查（审计 M3 + F3） ----------
    * 初始化成功不代表运行中一直正常。SPI 接触不良时读回来的可能是全 0、
@@ -64,7 +77,7 @@ void hello_world::imu::Imu::update()
    *
    * ★ 关键：坏样本**根本不进入**标定和 Mahony。如果先喂给滤波器再判"不健康"，
    *   一次坏数据就会把姿态拉歪，恢复起来要好几百毫秒（甚至永久偏掉）。 */
-  if (!IsSampleOk()) {
+  if (!IsSampleOk(sample_acc, sample_gyro, sample_temperature)) {
     ++bad_samples_total_;
     if (consecutive_bad_ < kImuBadSampleLimit) {
       ++consecutive_bad_;
@@ -75,6 +88,10 @@ void hello_world::imu::Imu::update()
     consecutive_good_ = 0;
     return;  /* 本周期不更新姿态，保持上一次的合理值 */
   }
+
+  sample_valid_ = true;
+  for (int i = 0; i < 3; ++i) acc_[i] = sample_acc[i];
+  temperature_ = sample_temperature;
 
   /* 好样本：要连续好够久才恢复健康，避免"一次正常采样就痊愈"（审计 F3） */
   consecutive_bad_ = 0;
@@ -93,7 +110,7 @@ void hello_world::imu::Imu::update()
       const float inv = 1.0f / static_cast<float>(samples_);
       for (int i = 0; i < 3; ++i) {
         const float mean = gyro_sum_[i] * inv;
-        if (std::fabs(gyro_bias_removed_[i] - mean) > kImuCalibMotionThres) {
+        if (std::fabs(sample_gyro[i] - mean) > kImuCalibMotionThres) {
           samples_ = 0;
           gyro_sum_[0] = gyro_sum_[1] = gyro_sum_[2] = 0.0f;
           break;
@@ -101,9 +118,9 @@ void hello_world::imu::Imu::update()
       }
     }
 
-    gyro_sum_[0] += gyro_bias_removed_[0];
-    gyro_sum_[1] += gyro_bias_removed_[1];
-    gyro_sum_[2] += gyro_bias_removed_[2];
+    gyro_sum_[0] += sample_gyro[0];
+    gyro_sum_[1] += sample_gyro[1];
+    gyro_sum_[2] += sample_gyro[2];
     ++samples_;
 
     if (samples_ >= kImuCalibSamples) {
@@ -123,18 +140,28 @@ void hello_world::imu::Imu::update()
   }
 
   /* ---------- 3. 扣零漂 ---------- */
-  gyro_bias_removed_[0] -= gyro_bias_[0];
-  gyro_bias_removed_[1] -= gyro_bias_[1];
-  gyro_bias_removed_[2] -= gyro_bias_[2];
+  gyro_bias_removed_[0] = sample_gyro[0] - gyro_bias_[0];
+  gyro_bias_removed_[1] = sample_gyro[1] - gyro_bias_[1];
+  gyro_bias_removed_[2] = sample_gyro[2] - gyro_bias_[2];
 
   /* ---------- 4. 姿态解算 ---------- */
   ahrs_.update(acc_, gyro_bias_removed_);
-  ahrs_.getEulerAngle(euler_);
+  float candidate_euler[3];
+  ahrs_.getEulerAngle(candidate_euler);
+  for (float angle : candidate_euler) {
+    if (!std::isfinite(angle)) {
+      ++bad_samples_total_;
+      restartCalibration();  // 解算状态异常需重建，不能把坏姿态交给控制层。
+      return;
+    }
+  }
+  for (int i = 0; i < 3; ++i) euler_[i] = candidate_euler[i];
 }
 
 /* Private function definitions ----------------------------------------------*/
 
-bool hello_world::imu::Imu::IsSampleOk() const
+bool hello_world::imu::Imu::IsSampleOk(
+    const float acc[3], const float gyro[3], float temperature) const
 {
   /* 判据（全部满足才认为这一个采样可信）：
    *   1. 所有采样都是有限数（不是 NaN / Inf）；
@@ -149,20 +176,22 @@ bool hello_world::imu::Imu::IsSampleOk() const
   constexpr float kAccNormMax = 40.0f;
   constexpr float kGyroAbsMax = 50.0f;
 
+  if (!std::isfinite(temperature)) return false;
+
   for (int i = 0; i < 3; ++i) {
-    if (!std::isfinite(acc_[i]) || !std::isfinite(gyro_bias_removed_[i])) {
+    if (!std::isfinite(acc[i]) || !std::isfinite(gyro[i])) {
       return false;
     }
   }
 
-  const float acc_norm = std::sqrt(acc_[0] * acc_[0] + acc_[1] * acc_[1] +
-                                   acc_[2] * acc_[2]);
+  const float acc_norm = std::sqrt(acc[0] * acc[0] + acc[1] * acc[1] +
+                                   acc[2] * acc[2]);
   if (acc_norm < kAccNormMin || acc_norm > kAccNormMax) {
     return false;
   }
 
   for (int i = 0; i < 3; ++i) {
-    if (std::fabs(gyro_bias_removed_[i]) > kGyroAbsMax) {
+    if (std::fabs(gyro[i]) > kGyroAbsMax) {
       return false;
     }
   }

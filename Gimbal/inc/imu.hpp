@@ -151,12 +151,15 @@ class Imu {
    */
   bool isHealthy() const { return healthy_; }
 
+  /** 本次采样可用于控制；单帧异常立即 false，不等待长期健康迟滞。 */
+  bool isSampleValid() const { return sample_valid_; }
+
   /** 累计异常采样数（调试用） */
   uint32_t badSamples() const { return bad_samples_total_; }
 
  private:
   /** 本周期采样是否可信（有限值、加速度/角速度量级正常） */
-  bool IsSampleOk() const;
+  bool IsSampleOk(const float acc[3], const float gyro[3], float temperature) const;
 
   BMI088 bmi_;         ///< 芯片驱动
   ahrs::Mahony ahrs_;  ///< 姿态解算
@@ -166,6 +169,7 @@ class Imu {
   bool calibrated_ = false;
 
   /* 运行期健康状态 */
+  bool sample_valid_ = false;
   bool healthy_ = false;          ///< 上电后要先采到合理数据才为 true
   uint16_t consecutive_bad_ = 0;  ///< 连续异常采样数
   uint16_t consecutive_good_ = 0; ///< 连续正常采样数（用于恢复判定）

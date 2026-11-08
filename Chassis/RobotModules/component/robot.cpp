@@ -57,6 +57,7 @@ constexpr float kMaxAbsW =
  */
 inline float UnitClamp(float value)
 {
+  if (!std::isfinite(value)) return 0.0f;
   return (value > 1.0f) ? 1.0f : ((value < -1.0f) ? -1.0f : value);
 }
 
@@ -115,6 +116,8 @@ void robot::Robot::init()
   state_enter_tick_ = hello_world::tick::GetTickMs();
   mode_ = ChassisMode::kSeparate;
   estop_ = false;
+  can_tx_guard_ = CanTxGuard{};
+  remote_armed_ = false;
   ramped_.reset();
   gimbal_yaw_rate_ = 0.0f;
   gimbal_pitch_target_ = 0.0f;
@@ -154,6 +157,22 @@ void robot::Robot::notifyRemoteRx()
   rc_checker_.update();
 }
 
+void robot::Robot::notifyCanTxCycle(bool success)
+{
+  if (!initialized_) return;
+  const bool reset_ack = isRemoteOnline() && (rc_ != nullptr) &&
+      rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown;
+  can_tx_guard_.update(success, reset_ack, hello_world::tick::GetTickMs());
+  if (!can_tx_guard_.healthy()) {
+    enterState(LifeState::kDead);
+    chassis_->stop();
+    remote_armed_ = false;
+    ramped_.reset();
+    gimbal_yaw_rate_ = 0.0f;
+    updateCommData();
+  }
+}
+
 void robot::Robot::notifyMotorRx(int slot)
 {
   if (slot >= 0 && slot < kMotorSlotNum) {
@@ -190,6 +209,9 @@ void robot::Robot::updateInput()
 {
   mode_ = readModeSwitch();
   estop_ = readEstopSwitch();
+  if (!isRemoteOnline()) remote_armed_ = false;
+  else if (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown)
+    remote_armed_ = true;
 }
 
 robot::ChassisMode robot::Robot::readModeSwitch() const
@@ -228,12 +250,12 @@ void robot::Robot::updateStateMachine()
   const bool remote_ok = isRemoteOnline();
   /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
   const bool imu_ok =
-      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
+      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   const bool motors_ok = areAllMotorsOnline();
   /* 对方在线且已经进入 Working：云台没准备好就不许开车（枪口会乱晃） */
   const bool peer_ok =
       (comm_ != nullptr) && !comm_->isOffline() && comm_->gimbal_data().working;
-  const bool all_ok = remote_ok && imu_ok && motors_ok && peer_ok;
+  const bool all_ok = remote_ok && remote_armed_ && imu_ok && motors_ok && peer_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();
 
@@ -272,6 +294,8 @@ void robot::Robot::enterState(LifeState next)
   }
   state_ = next;
   state_enter_tick_ = hello_world::tick::GetTickMs();
+  // 对板单独复位也会使本板退回 Dead；撤销旧授权，防止对板恢复后自动带杆起动。
+  if (next == LifeState::kDead) remote_armed_ = false;
 
   if (next == LifeState::kWorking) {
     initWorkingTargets();
@@ -354,10 +378,25 @@ void robot::Robot::generateCommand()
   raw.vx = robot::Clamp(raw.vx, -kMaxLinearSpeed, kMaxLinearSpeed);
   raw.vy = robot::Clamp(raw.vy, -kMaxLinearSpeed, kMaxLinearSpeed);
   raw.w = robot::Clamp(raw.w, -kMaxAbsW, kMaxAbsW);
+  const float speed = std::hypot(raw.vx, raw.vy);
+  if (speed > kMaxLinearSpeed) {
+    raw.vx *= kMaxLinearSpeed / speed;
+    raw.vy *= kMaxLinearSpeed / speed;
+  }
+  // 数值异常不进入斜坡；清除整组目标，避免只停一轴后仍有意外运动。
+  if (!std::isfinite(raw.vx) || !std::isfinite(raw.vy) || !std::isfinite(raw.w)) {
+    ramped_.reset();
+    gimbal_yaw_rate_ = 0.0f;
+    return;
+  }
 
   /* ---------------- 加速度限幅 ---------------- */
-  ramped_.vx = Slew(ramped_.vx, raw.vx, kLinearAccel * kDt);
-  ramped_.vy = Slew(ramped_.vy, raw.vy, kLinearAccel * kDt);
+  // 平移按向量限加速度：保持斜推方向，合加速度也不超过 8 m/s²。
+  const float dx = raw.vx - ramped_.vx, dy = raw.vy - ramped_.vy;
+  const float distance = std::hypot(dx, dy);
+  const float scale = distance > kLinearAccel * kDt ? kLinearAccel * kDt / distance : 1.0f;
+  ramped_.vx += dx * scale;
+  ramped_.vy += dy * scale;
   ramped_.w = Slew(ramped_.w, raw.w, kAngularAccel * kDt);
 
   /* ---------------- 云台指令 ---------------- */
@@ -391,7 +430,10 @@ void robot::Robot::applyOutput()
    * 现在的顺序保证：只要急停生效，不管什么状态都一步不动。 */
   if (estop_) {
     chassis_->stop();
+    ramped_.reset();
     gimbal_yaw_rate_ = 0.0f;
+    // 急停期间重新同步 pitch，解除时不释放急停前残留目标。
+    gimbal_pitch_target_ = comm_->gimbal_data().pitch_joint;
     return;
   }
 
@@ -421,7 +463,7 @@ void robot::Robot::updateCommData()
   d.working = (state_ == LifeState::kWorking);
   d.estop = estop_;
   d.dbus_online = isRemoteOnline();
-  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy();
+  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   d.gimbal_enable = d.working && !estop_;
   d.mode = mode_;
   d.yaw_rate = d.gimbal_enable ? gimbal_yaw_rate_ : 0.0f;

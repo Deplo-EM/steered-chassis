@@ -27,14 +27,14 @@
  *   byte 1~2: yaw_rate_cmd  int16，单位 0.001 rad/s（云台 yaw 角速度设定）
  *   byte 3~4: pitch_target  int16，单位 0.0001 rad（云台 pitch 关节角目标）
  *   byte 5   : 保留（填 0，将来加字段用）
- *   byte 6   : 序号 seq，每帧 +1，用于观察是否丢帧
+ *   byte 6   : 序号 seq，每帧 +1；拒绝重复/短窗口逆序，离线后可同步重启序号
  *   byte 7   : CRC8（对 byte0~6 计算，多项式 0x07，初值 0）
  *
  *  ── 云台 → 底盘（G2C，CAN 标准帧 0x211）─────────────────────────────
  *   byte 0 : 标志位
  *            bit0 alive        本板已初始化并开始发帧
  *            bit1 working      本板状态机处于 Working
- *            bit2 estop        云台本地判定的急停
+ *            bit2 estop        仅云台本地遥控急停，不回显 C2G 急停
  *            bit3 dbus_online  云台板遥控器在线
  *            bit4 imu_ready    云台板 IMU 零漂标定完成
  *            bit5 pitch_at_limit pitch 已到软件限位
@@ -135,7 +135,7 @@ class GimbalChassisComm {
   /* 编码己方帧：把本地 ChassisData / GimbalData 打包进 8 字节。 */
   void encode(uint8_t tx_data[8]);
   /* 解码对方帧：把 8 字节还原成对方语义并更新本地缓存。
-   * @retval true 校验通过、数据已更新；false CRC 错误，整帧丢弃、缓存保持原值。
+   * @retval true 校验通过、数据已更新；false CRC / 字段 / 序号不通过，整帧丢弃、不刷新在线时间。
    * @note  返回值很重要：调用方必须只在 true 时认为"对方活着"（喂狗、刷新时间戳），
    *        否则一帧干扰数据也能把看门狗喂住。 */
   bool decode(const uint8_t rx_data[8]);
@@ -164,9 +164,13 @@ class GimbalChassisComm {
   uint32_t rx_id_;
   uint32_t last_rx_tick_;  ///< 上次收到对方帧的 GetTickMs() 时间戳
   bool received_ = false;  ///< 是否收到过至少一帧（没收到过时一律算离线）
+  uint8_t rx_seq_ = 0;     ///< 最近成功接受的序号
+  bool resync_pending_ = false;
+  uint8_t resync_seq_ = 0;
+  uint32_t resync_tick_ = 0;
   uint8_t tx_seq_ = 0;     ///< 发送序号
   uint32_t rx_ok_count_ = 0;     ///< 成功解码的帧数
-  uint32_t rx_error_count_ = 0;  ///< CRC 错误的帧数
+  uint32_t rx_error_count_ = 0;  ///< CRC、字段或序号校验失败的帧数
   ChassisData chassis_data_;
   GimbalData gimbal_data_;
 };

@@ -36,6 +36,7 @@ constexpr float kYawRateScale = 1000.0f;
  *  也避免 lroundf 溢出到实现未定义的行为。 */
 inline int16_t FloatToInt16(float value, float scale)
 {
+  if (!std::isfinite(value)) return 0;
   float scaled = value * scale;
   if (scaled > 32767.0f) {
     scaled = 32767.0f;
@@ -97,7 +98,11 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
 
   if (code_part_ == CodePart::Chassis) {
     /* ---------------------------- 底盘 → 云台 ---------------------------- */
-    ChassisData& d = chassis_data_;
+    ChassisData d = chassis_data_;
+    if (!std::isfinite(d.yaw_rate) || !std::isfinite(d.pitch_target)) {
+      d = ChassisData{};
+      d.estop = true;  // 异常数不得带着 working/enable 被发给对板。
+    }
     d.alive = true;  /* 能执行到 encode，说明本板活着 */
 
     uint8_t flags = 0;
@@ -114,7 +119,11 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
     WriteInt16(tx_data, 3, FloatToInt16(d.pitch_target, kAngleScale));
   } else {
     /* ---------------------------- 云台 → 底盘 ---------------------------- */
-    GimbalData& d = gimbal_data_;
+    GimbalData d = gimbal_data_;
+    if (!std::isfinite(d.yaw_joint) || !std::isfinite(d.pitch_joint)) {
+      d = GimbalData{};
+      d.estop = true;
+    }
     d.alive = true;
 
     uint8_t flags = 0;
@@ -145,6 +154,35 @@ bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
   }
 
   const uint8_t flags = rx_data[0];
+  const bool fields_ok = rx_data[5] == 0u &&
+      (code_part_ == CodePart::Chassis ? (flags & 0xC0u) == 0u
+                                    : ((flags >> 4) & 0x03u) <= 2u);
+  if (!fields_ok) {
+    ++rx_error_count_;
+    return false;
+  }
+
+  const uint32_t now = hello_world::tick::GetTickMs();
+  const uint8_t seq = rx_data[6];
+  const uint8_t advance = static_cast<uint8_t>(seq - rx_seq_);
+  if (received_ && (advance == 0u || advance >= 128u)) {
+    // 同序号永不保活。离线后的逆序可能是对方重启：先暂存，再等递增帧确认。
+    // 8 位序号只检查短窗口次序，不是认证，也无法排除完整循环的历史重放。
+    const bool resynced = advance != 0u && isOffline() && resync_pending_ &&
+        static_cast<uint8_t>(seq - resync_seq_) == 1u &&
+        (now - resync_tick_) <= kCommOfflineThresholdMs;
+    if (!resynced) {
+      if (advance != 0u && isOffline()) {
+        resync_pending_ = true;
+        resync_seq_ = seq;
+        resync_tick_ = now;
+      }
+      ++rx_error_count_;
+      return false;
+    }
+  }
+  resync_pending_ = false;
+  rx_seq_ = seq;
 
   if (code_part_ == CodePart::Chassis) {
     /* 底盘板收到的是云台的 G2C 帧 */
