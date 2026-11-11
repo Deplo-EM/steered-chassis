@@ -202,6 +202,8 @@ class Imu {
   uint32_t rej_clock_ = 0;      ///< 设备时钟回退（触发重新标定）
   uint32_t rej_fresh_ = 0;      ///< 时钟/加速度/陀螺新鲜度超时
   uint32_t rej_sample_ = 0;     ///< 数值判据不合格（NaN、量级异常）
+  /** 新鲜度失败时，分别记录哪一个时间戳过期，定位断流来源。 */
+  uint32_t stale_clock_ = 0, stale_accel_ = 0, stale_gyro_ = 0;
   float gyro_bias_removed_[3] = {0.0f, 0.0f, 0.0f};
   float euler_[3] = {0.0f, 0.0f, 0.0f};
   float temperature_ = 0.0f;

@@ -86,7 +86,13 @@ void hello_world::imu::Imu::update()
   }
   if (info.accel_ready) { accel_seen_=true; last_accel_tick_=now; }
   if (info.gyro_ready) { gyro_seen_=true; last_gyro_tick_=now; }
-  if (!FreshnessOk(now)) { ++rej_fresh_; RejectSample(); return; }
+  if (!FreshnessOk(now)) {
+    ++rej_fresh_;
+    if ((now - last_clock_tick_) > kImuFreshnessMs) ++stale_clock_;
+    if ((now - last_accel_tick_) > kImuFreshnessMs) ++stale_accel_;
+    if ((now - last_gyro_tick_) > kImuFreshnessMs) ++stale_gyro_;
+    return;
+  }
   // 轮询相位导致暂时没有新陀螺样本时，保留有时限的上一有效状态，不重复积分/标定。
   if (!info.gyro_ready) return;
 
