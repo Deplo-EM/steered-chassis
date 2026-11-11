@@ -56,7 +56,7 @@ namespace {
  *        台架上需要连着调试器、又不接遥控器时，可以临时改成 true —— 此时
  *        看门狗不再起保护作用，**绝不能用于实车控制**，验收前必须改回来。
  */
-constexpr bool kDebugAlwaysFeedWatchdog = false;
+constexpr bool kDebugAlwaysFeedWatchdog = true;  /* 台架诊断临时打开：禁止上车/验收 */
 
 /** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
 constexpr uint32_t kDbusTimeoutMs = 100u;
