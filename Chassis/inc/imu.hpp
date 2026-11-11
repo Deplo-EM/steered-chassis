@@ -195,6 +195,13 @@ class Imu {
 
   /* 最新数据 */
   float acc_[3] = {0.0f, 0.0f, 0.0f};
+  /** 最新一帧「芯片原始」陀螺（未减零偏），供现场调试观察；不参与控制。 */
+  float gyro_raw_[3] = {0.0f, 0.0f, 0.0f};
+  /** 四类拒绝的累计次数，供现场定位是哪一步把样本丢掉。 */
+  uint32_t rej_transport_ = 0;  ///< getData 返回 false（SPI/传输失败）
+  uint32_t rej_clock_ = 0;      ///< 设备时钟回退（触发重新标定）
+  uint32_t rej_fresh_ = 0;      ///< 时钟/加速度/陀螺新鲜度超时
+  uint32_t rej_sample_ = 0;     ///< 数值判据不合格（NaN、量级异常）
   float gyro_bias_removed_[3] = {0.0f, 0.0f, 0.0f};
   float euler_[3] = {0.0f, 0.0f, 0.0f};
   float temperature_ = 0.0f;

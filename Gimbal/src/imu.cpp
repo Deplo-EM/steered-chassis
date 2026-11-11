@@ -71,7 +71,7 @@ void hello_world::imu::Imu::update()
   float sample_temperature = invalid;
   BMI088SampleInfo info;
   if (!bmi_.getData(sample_acc, sample_gyro, &sample_temperature, &info)) {
-    RejectSample(); return;
+    ++rej_transport_; RejectSample(); return;
   }
   const uint32_t now=hello_world::tick::GetTickMs();
   if (!clock_seen_) {
@@ -80,13 +80,13 @@ void hello_world::imu::Imu::update()
     const uint32_t advance=(info.sensor_time-last_clock_)&0xFFFFFFu;
     if (advance>=0x800000u) {
       // 时钟回退/设备重启：原偏置与姿态不再可信，重新标定后再授权。
-      restartCalibration(); RejectSample(); return;
+      ++rej_clock_; restartCalibration(); RejectSample(); return;
     }
     if (advance>0) { last_clock_=info.sensor_time; last_clock_tick_=now; }
   }
   if (info.accel_ready) { accel_seen_=true; last_accel_tick_=now; }
   if (info.gyro_ready) { gyro_seen_=true; last_gyro_tick_=now; }
-  if (!FreshnessOk(now)) { RejectSample(); return; }
+  if (!FreshnessOk(now)) { ++rej_fresh_; RejectSample(); return; }
   // 轮询相位导致暂时没有新陀螺样本时，保留有时限的上一有效状态，不重复积分/标定。
   if (!info.gyro_ready) return;
 
@@ -94,12 +94,15 @@ void hello_world::imu::Imu::update()
    * ★ 坏样本**根本不进入**标定和 Mahony。如果先喂给滤波器再判"不健康"，
    *   一次坏数据就会把姿态拉歪，恢复起来要好几百毫秒。 */
   if (!IsSampleOk(sample_acc, sample_gyro, sample_temperature)) {
-    RejectSample(); return;
+    ++rej_sample_; RejectSample(); return;
   }
 
   sample_valid_ = true;
   last_sample_tick_=now;
-  for (int i = 0; i < 3; ++i) acc_[i] = sample_acc[i];
+  for (int i = 0; i < 3; ++i) {
+    acc_[i] = sample_acc[i];
+    gyro_raw_[i] = sample_gyro[i];
+  }
   temperature_ = sample_temperature;
 
   /* 好样本：要连续好够久才恢复健康，避免"一次正常采样就痊愈"（审计 F3） */
