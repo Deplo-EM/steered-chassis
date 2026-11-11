@@ -39,6 +39,10 @@ void CanFilter_Init(CAN_HandleTypeDef *hcan);
 
 /** 实时读取硬件 bus-off 位；不依赖 HAL 错误中断是否开启。 */
 bool CAN_Is_BusOff(const CAN_HandleTypeDef *hcan);
+/** 监督已提交邮箱的TXOK/完成超时，失败时请求撤销旧队列。 */
+bool CAN_TxHealthy(CAN_HandleTypeDef *hcan);
+/** 撤销所有待发帧；true表示邮箱已全空，false需重试；不能撤回已上总线的帧。 */
+bool CAN_AbortPendingTx(CAN_HandleTypeDef *hcan);
 
 /**
  * @brief       向 CAN 总线发送一帧标准帧
@@ -46,7 +50,7 @@ bool CAN_Is_BusOff(const CAN_HandleTypeDef *hcan);
  * @param       msg: 待发送的 8 字节数据首地址
  * @param       id: 标准帧 ID（11 位）
  * @param       len: 数据长度（字节数，一般 8）
- * @retval      true 已成功放进发送邮箱；false 邮箱已满 / 总线错误（这一帧没发出去）
+ * @retval      true 本次已入邮箱，仍待完成监督；false 提交/监督失败，不能保证报文未上总线
  * @note        返回值必须检查：急停时如果零力矩帧没发出去，达妙会继续执行上一条
  *              指令（它是一发一收、不收到新指令就保持上一帧）。调用方应统计失败
  *              次数，验收时观察它是否为 0。

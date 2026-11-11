@@ -28,7 +28,7 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
   bmi_.init(hw_config, rot_mat_flatten, config);
 
   /* imuInit 内部会做「读芯片 ID + 配置寄存器 + 可选自检」，成功返回 0。
-   * 返回非 0 时最常见的原因是片选引脚接反了：把 acc_cs / gyro_cs 对调即可。 */
+   * 返回非0时按错误位排查供电、SPI、芯片ID和配置；只在核对原理图确认接反后修正片选。 */
   error_state_ = bmi_.imuInit(false);
   if (error_state_ != kBMI088ErrStateNoErr) {
     inited_ = false;
@@ -45,6 +45,7 @@ void hello_world::imu::Imu::restartCalibration()
 {
   calibrated_ = false;
   sample_valid_ = false;
+  clock_seen_=accel_seen_=gyro_seen_=false;
   healthy_ = false;
   consecutive_bad_ = consecutive_good_ = 0;
   gyro_bias_removed_[0] = gyro_bias_removed_[1] = gyro_bias_removed_[2] = 0.0f;
@@ -57,8 +58,8 @@ void hello_world::imu::Imu::restartCalibration()
 
 void hello_world::imu::Imu::update()
 {
-  sample_valid_ = false;
   if (!inited_) {
+    sample_valid_=false;
     return;
   }
 
@@ -68,24 +69,36 @@ void hello_world::imu::Imu::update()
   float sample_acc[3] = {invalid, invalid, invalid};
   float sample_gyro[3] = {invalid, invalid, invalid};
   float sample_temperature = invalid;
-  bmi_.getData(sample_acc, sample_gyro, &sample_temperature);
+  BMI088SampleInfo info;
+  if (!bmi_.getData(sample_acc, sample_gyro, &sample_temperature, &info)) {
+    RejectSample(); return;
+  }
+  const uint32_t now=hello_world::tick::GetTickMs();
+  if (!clock_seen_) {
+    clock_seen_=true; last_clock_=info.sensor_time; last_clock_tick_=now;
+  } else {
+    const uint32_t advance=(info.sensor_time-last_clock_)&0xFFFFFFu;
+    if (advance>=0x800000u) {
+      // 时钟回退/设备重启：原偏置与姿态不再可信，重新标定后再授权。
+      restartCalibration(); RejectSample(); return;
+    }
+    if (advance>0) { last_clock_=info.sensor_time; last_clock_tick_=now; }
+  }
+  if (info.accel_ready) { accel_seen_=true; last_accel_tick_=now; }
+  if (info.gyro_ready) { gyro_seen_=true; last_gyro_tick_=now; }
+  if (!FreshnessOk(now)) { RejectSample(); return; }
+  // 轮询相位导致暂时没有新陀螺样本时，保留有时限的上一有效状态，不重复积分/标定。
+  if (!info.gyro_ready) return;
 
   /* ---------- 1.5 运行期健康检查（审计 M3 + F3） ----------
    * ★ 坏样本**根本不进入**标定和 Mahony。如果先喂给滤波器再判"不健康"，
    *   一次坏数据就会把姿态拉歪，恢复起来要好几百毫秒。 */
   if (!IsSampleOk(sample_acc, sample_gyro, sample_temperature)) {
-    ++bad_samples_total_;
-    if (consecutive_bad_ < kImuBadSampleLimit) {
-      ++consecutive_bad_;
-    }
-    if (consecutive_bad_ >= kImuBadSampleLimit) {
-      healthy_ = false;
-    }
-    consecutive_good_ = 0;
-    return;  /* 本周期不更新姿态，保持上一次的合理值 */
+    RejectSample(); return;
   }
 
   sample_valid_ = true;
+  last_sample_tick_=now;
   for (int i = 0; i < 3; ++i) acc_[i] = sample_acc[i];
   temperature_ = sample_temperature;
 
@@ -156,6 +169,15 @@ void hello_world::imu::Imu::update()
 
 /* Private function definitions ----------------------------------------------*/
 
+void hello_world::imu::Imu::RejectSample()
+{
+  sample_valid_=false;
+  ++bad_samples_total_;
+  if (consecutive_bad_<kImuBadSampleLimit) ++consecutive_bad_;
+  if (consecutive_bad_>=kImuBadSampleLimit) healthy_=false;
+  consecutive_good_=0;
+}
+
 bool hello_world::imu::Imu::IsSampleOk(
     const float acc[3], const float gyro[3], float temperature) const
 {
@@ -165,9 +187,8 @@ bool hello_world::imu::Imu::IsSampleOk(
    *      读回全 0 或全 0xFF 时会明显落在区间外；
    *   3. 角速度绝对值 < 50 rad/s：任何正常的车都到不了这个量级。
    *
-   * ⚠️ 局限（审计 F3 指出）：BMI088 驱动把 HAL_SPI 的返回值丢掉了，所以
-   *    "读数冻结在物理上合理的旧值"这种情况这里检测不到。要彻底解决需要改
-   *    芯片驱动去上报 SPI 状态，属于另一个层面的改动，已在 docs/07 记录。 */
+   * 传输状态、设备时钟和DRDY新鲜度在本函数前单独检查，不能用量级校验替代。
+   * 设备内部若持续伪造合理数值且时钟/DRDY仍正常，仍需独立硬件证据识别。 */
   constexpr float kAccNormMin = 2.0f;
   constexpr float kAccNormMax = 40.0f;
   constexpr float kGyroAbsMax = 50.0f;

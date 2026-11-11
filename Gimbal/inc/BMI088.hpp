@@ -51,6 +51,7 @@ enum BMI088ErrState : uint8_t {  ///* 通过或运算拼接
   kBMI088ErrStateGyroSelfTestFailed = 1u << 3,
   kBMI088ErrStateAccConfigErr = 1u << 4,
   kBMI088ErrStateGyroConfigErr = 1u << 5,
+  kBMI088ErrStateSpi = 1u << 6,  ///< SPI传输失败
 };
 
 enum BMI088AccRange : uint8_t {  ///* BMI088 加速度计量程，单位：g
@@ -115,6 +116,12 @@ struct BMI088Config {  ///* BMI088 设备配置
   BMI088AccOsr acc_osr = kBMI088AccOsr4;
   BMI088GyroRange gyro_range = kBMI088GyroRange1000Dps;
   BMI088GyroOdrFbw gyro_odr_fbw = kBMI088GyroOdrFbw1000_116;
+};
+
+struct BMI088SampleInfo {
+  uint32_t sensor_time = 0;  ///< 24位硬件时钟，39.0625us/计数
+  bool accel_ready = false;
+  bool gyro_ready = false;
 };
 
 class BMI088 : public MemMgr
@@ -184,7 +191,9 @@ class BMI088 : public MemMgr
    * @retval       None
    * @note        传入 null_ptr 则不获取对应数据
    */
-  void getData(float acc_data[3], float gyro_data[3], float* temp) const;
+  /** 返回false时不发布任何字段；info用于硬件新鲜度监督。 */
+  bool getData(float acc_data[3], float gyro_data[3], float* temp,
+               BMI088SampleInfo* info = nullptr) const;
 
  private:
   /* 功能性方法 */
@@ -337,6 +346,7 @@ class BMI088 : public MemMgr
   GPIO_TypeDef* gyro_cs_port_ = nullptr;  ///* 陀螺仪片选端口
   uint32_t gyro_cs_pin_ = GPIO_PIN_0;     ///* 陀螺仪片选引脚
 
+  mutable bool io_ok_ = true;  ///< 本次整组事务累计状态，单个成功不能掩盖失败
   BMI088Config config_;
   float rot_mat_flatten_[9] = {1.0f, 0.0f, 0.0f,
                                0.0f, 1.0f, 0.0f,

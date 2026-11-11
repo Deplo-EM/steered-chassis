@@ -54,7 +54,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 每组单独进程/可执行文件，避免测试替身污染其它模块；任一组失败返回非零。
 $engine = (Get-Process -Id $PID).Path
-foreach ($script in @('run_control_tests.ps1', 'run_imu_tests.ps1', 'run_protocol_tests.ps1', 'run_safety_tests.ps1')) {
+foreach ($script in @('run_control_tests.ps1', 'run_imu_tests.ps1', 'run_protocol_tests.ps1', 'run_safety_tests.ps1', 'run_motor_tests.ps1', 'run_bmi_tests.ps1', 'run_can_tests.ps1', 'run_field_tests.ps1')) {
     Write-Host "运行 $script ..." -ForegroundColor Cyan
     & $engine -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot $script)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

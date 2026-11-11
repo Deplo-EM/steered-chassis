@@ -9,7 +9,7 @@
  * @attention :
  *  ★ 两个片选引脚如果接反，现象是 imuInit() 返回「加速度计未找到」★
  *  SPI1 引脚：SCK=PB3 / MISO=PB4 / MOSI=PA7，两个片选是 PA4 与 PB0。
- *  若 errorState() 非 0、或姿态一直不动，就把下面两个 CS 对调。
+ *  errorState非0或姿态异常时先查供电、SPI和芯片ID；仅在原理图证实接反后修正CS。
  *
  *  云台板的 IMU 装在云台（枪管）上，所以它测到的 yaw 就是「枪口的世界朝向」，
  *  这正是 yaw 世界系稳定所依赖的量。

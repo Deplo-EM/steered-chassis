@@ -99,8 +99,13 @@ class Gimbal {
    * @param yaw_world_meas 云台当前的世界系 yaw（来自云台 IMU），rad
    */
   void update(float dt, float yaw_world_meas);
+  /** 在控制周期输入快照阶段调用，避免关节位置/健康来自不同反馈。 */
+  void captureFeedback();
+  bool feedbackHealthy() const { return feedback_healthy_; }
 
   /** 两个电机输出归零（急停 / 未就绪） */
+  /** 只清PID历史，恢复出力时保留本周期已经捕获的反馈。 */
+  void resetControllers();
   void stop();
 
   /* ---------------- 状态查询 ---------------- */
@@ -126,6 +131,10 @@ class Gimbal {
   float pitch_target_ = 0.0f;  ///< 关节目标角
   bool pitch_at_limit_ = false;
   bool ready_ = false;
+  bool feedback_pending_ = false;
+  bool feedback_valid_ = false;
+  bool feedback_healthy_ = false;
+  float yaw_feedback_ = 0, pitch_feedback_ = 0;
 };
 
 }  // namespace robot

@@ -20,7 +20,7 @@ volatile CpuStats g_cpu;
 
 void RecordCycle(uint32_t ticks, uint32_t budget_ticks)
 {
-  ++g_cpu.cycle_count;
+  g_cpu.cycle_count = g_cpu.cycle_count + 1u;
   g_cpu.last_cycle_ticks = ticks;
 
   if (ticks > g_cpu.cycle_ticks_max) {
@@ -33,7 +33,7 @@ void RecordCycle(uint32_t ticks, uint32_t budget_ticks)
       g_cpu.cycle_ticks_avg - (g_cpu.cycle_ticks_avg >> 4) + (ticks >> 4);
 
   if (ticks > budget_ticks) {
-    ++g_cpu.overrun_count;
+    g_cpu.overrun_count = g_cpu.overrun_count + 1u;
   }
 }
 

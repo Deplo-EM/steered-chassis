@@ -20,7 +20,7 @@
  *            bit0 alive        本板已初始化并开始发帧
  *            bit1 working      本板状态机处于 Working
  *            bit2 estop        急停
- *            bit3 dbus_online  本板遥控器在线（看门狗喂狗依据）
+ *            bit3 dbus_online  底盘选定遥控源在线（本地或完整转发）
  *            bit4~5 mode       底盘工作模式（0 分离 / 1 跟随 / 2 小陀螺）
  *            bit6 imu_ready    本板 IMU 零漂标定完成
  *            bit7 gimbal_enable 允许云台输出
@@ -76,6 +76,7 @@
 #include <cstdint>
 
 #include "module_state.hpp"
+#include "dbus_relay.hpp"
 #include "tick.hpp"
 
 /* Exported macro ------------------------------------------------------------*/
@@ -87,7 +88,7 @@ constexpr uint32_t kCommIdChassisToGimbal = 0x210u;  ///< 底盘 → 云台
 constexpr uint32_t kCommIdGimbalToChassis = 0x211u;  ///< 云台 → 底盘
 
 /** 对方离线判定阈值（ms）：超过这个时间没收到新帧就算掉线。
- *  帧率是 1kHz，100ms 相当于连续丢了 100 帧，足够排除偶发丢帧。 */
+ *  状态帧率是200Hz，100ms约为连续丢20帧，足够排除偶发丢帧。 */
 constexpr uint32_t kCommOfflineThresholdMs = 100u;
 
 /** 通信帧长度 */
@@ -107,7 +108,7 @@ class GimbalChassisComm {
     bool alive = false;        ///< 本板已初始化并开始发帧
     bool working = false;      ///< 状态机处于 Working
     bool estop = false;        ///< 急停
-    bool dbus_online = false;  ///< 本板遥控器在线
+    bool dbus_online = false;  ///< 底盘选定遥控源在线
     bool imu_ready = false;    ///< 本板 IMU 零漂标定完成
     bool gimbal_enable = false;///< 允许云台输出（急停 / 未就绪时为 false）
 
@@ -157,6 +158,8 @@ class GimbalChassisComm {
   GimbalData &gimbal_data() { return gimbal_data_; }
   const ChassisData &chassis_data() const { return chassis_data_; }
   const GimbalData &gimbal_data() const { return gimbal_data_; }
+  DbusRelay& remote_relay() { return remote_relay_; }
+  const DbusRelay& remote_relay() const { return remote_relay_; }
 
  private:
   CodePart code_part_;
@@ -173,6 +176,7 @@ class GimbalChassisComm {
   uint32_t rx_error_count_ = 0;  ///< CRC、字段或序号校验失败的帧数
   ChassisData chassis_data_;
   GimbalData gimbal_data_;
+  DbusRelay remote_relay_;  ///< 云台本地DBUS向底盘转发，独立于状态心跳的新鲜度
 };
 /* Exported variables --------------------------------------------------------*/
 /* Exported function prototypes ----------------------------------------------*/

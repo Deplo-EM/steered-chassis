@@ -40,6 +40,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "BMI088.hpp"
 #include "mahony.hpp"
+#include "tick.hpp"
 
 namespace hello_world {
 namespace imu {
@@ -67,6 +68,8 @@ constexpr uint16_t kImuBadSampleLimit = 50u;
 /** 恢复健康需要连续多少个正常采样（1kHz → 100ms）。
  *  要求"连续好够久"才恢复，避免一次正常采样就宣布痊愈（审计 F3）。 */
 constexpr uint16_t kImuGoodSampleLimit = 100u;
+/** 新样本/硬件时钟最大允许停滞时间(ms)，兼容1kHz轮询相位抖动。 */
+constexpr uint32_t kImuFreshnessMs = 20u;
 
 /** 默认安装矩阵：传感器坐标 = 车体坐标（x 前、y 左、z 上）。
  *  若 IMU 是倒装 / 转 90° 装的，改这个矩阵即可，不用动解算代码。 */
@@ -152,7 +155,10 @@ class Imu {
   bool isHealthy() const { return healthy_; }
 
   /** 本次采样可用于控制；单帧异常立即 false，不等待长期健康迟滞。 */
-  bool isSampleValid() const { return sample_valid_; }
+  bool isSampleValid() const {
+    const uint32_t now=hello_world::tick::GetTickMs();
+    return sample_valid_ && FreshnessOk(now) && (now-last_sample_tick_)<=kImuFreshnessMs;
+  }
 
   /** 累计异常采样数（调试用） */
   uint32_t badSamples() const { return bad_samples_total_; }
@@ -161,6 +167,14 @@ class Imu {
   /** 本周期采样是否可信（有限值、加速度/角速度量级正常） */
   bool IsSampleOk(const float acc[3], const float gyro[3], float temperature) const;
 
+  void RejectSample();
+  bool FreshnessOk(uint32_t now) const {
+    return clock_seen_ && accel_seen_ && gyro_seen_ &&
+      (now-last_clock_tick_)<=kImuFreshnessMs &&
+      (now-last_accel_tick_)<=kImuFreshnessMs && (now-last_gyro_tick_)<=kImuFreshnessMs;
+  }
+  bool clock_seen_=false, accel_seen_=false, gyro_seen_=false;
+  uint32_t last_clock_=0, last_clock_tick_=0, last_accel_tick_=0, last_gyro_tick_=0, last_sample_tick_=0;
   BMI088 bmi_;         ///< 芯片驱动
   ahrs::Mahony ahrs_;  ///< 姿态解算
   BMI088ErrState error_state_ = kBMI088ErrStateNoErr;

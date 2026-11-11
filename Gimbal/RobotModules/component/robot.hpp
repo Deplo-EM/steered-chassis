@@ -31,6 +31,8 @@
 
 #include "module_state.hpp"
 #include "can_tx_guard.hpp"
+#include "remote_input.hpp"
+#include "gimbal_chassis_comm.hpp"
 #include "offline_checker.hpp"
 
 namespace hello_world {
@@ -84,6 +86,10 @@ class Robot {
   bool isEstopped() const { return estop_; }
   bool isRemoteOnline();
   bool areAllMotorsOnline();
+  /** 本周期下发资格，用于通信层停机沿撤销旧队列。 */
+  bool outputPermitted() const { return state_ == LifeState::kWorking && !estop_ && peer_online_ &&
+      peer_input_.alive && peer_input_.working && peer_input_.dbus_online &&
+      peer_input_.imu_ready && peer_input_.gimbal_enable && !peer_input_.estop; }
 
  private:
   void updateInput();
@@ -105,6 +111,10 @@ class Robot {
   uint32_t state_enter_tick_ = 0;
   bool initialized_ = false;
   CanTxGuard can_tx_guard_;
+  RemoteInput remote_input_;
+  GimbalChassisComm::ChassisData peer_input_;
+  bool peer_online_ = false;
+  bool motors_online_ = false;
 
   bool estop_ = false;
   /** yaw 世界系目标（每周期归一化至 [-pi, pi)，误差也按最短角计算） */

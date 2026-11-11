@@ -22,6 +22,7 @@
 
 #include "motor_base.hpp"
 #include "pid.hpp"
+#include "critical_section.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 /** 判定「到限位」的余量，rad */
@@ -46,6 +47,7 @@ void robot::Gimbal::init(hello_world::motor::Motor* yaw_motor,
   yaw_target_ = 0.0f;
   pitch_target_ = 0.0f;
   pitch_at_limit_ = false;
+  feedback_valid_=feedback_pending_=feedback_healthy_=false;
 }
 
 void robot::Gimbal::setPitchTarget(float pitch_joint)
@@ -64,12 +66,25 @@ void robot::Gimbal::setPitchTarget(float pitch_joint)
       (pitch_joint <= kPitchLowerLimit + kPitchLimitMargin);
 }
 
+void robot::Gimbal::captureFeedback()
+{
+  CriticalSection lock;
+  feedback_healthy_ = ready_ && yaw_motor_->isHealthy() && pitch_motor_->isHealthy();
+  yaw_feedback_ = yaw_motor_ ? yaw_motor_->angle() : 0;
+  pitch_feedback_ = pitch_motor_ ? pitch_motor_->angle() : 0;
+  feedback_pending_=true;
+  feedback_valid_=true;
+}
+
 void robot::Gimbal::update(float dt, float yaw_world_meas)
 {
   if (!ready_) {
     return;
   }
 
+  if (!feedback_pending_) captureFeedback();
+  feedback_pending_=false;
+  if (!feedback_healthy_) { stop(); return; }
   // 任一轴反馈或目标异常时整组停机，禁止 NaN 进入 PID 或电机的整数编码。
   // 目标保留异常标记，调用方必须给出新的有效目标才可恢复。
   if (!std::isfinite(dt) || dt <= 0.0f || !std::isfinite(yaw_world_meas) ||
@@ -106,19 +121,21 @@ void robot::Gimbal::update(float dt, float yaw_world_meas)
 
 void robot::Gimbal::stop()
 {
+  feedback_pending_=false;
   if (yaw_motor_ != nullptr) {
     yaw_motor_->setInput(0.0f);
   }
   if (pitch_motor_ != nullptr) {
     pitch_motor_->setInput(0.0f);
   }
-  if (yaw_pid_ != nullptr && yaw_motor_ != nullptr) {
-    yaw_pid_->reset(yaw_motor_->angle());
-  }
-  if (pitch_pid_ != nullptr && pitch_motor_ != nullptr) {
-    pitch_pid_->reset(pitch_motor_->angle());
-  }
+  resetControllers();
   pitch_at_limit_ = false;
+}
+
+void robot::Gimbal::resetControllers()
+{
+  if (yaw_pid_ != nullptr) yaw_pid_->reset();
+  if (pitch_pid_ != nullptr) pitch_pid_->reset();
 }
 
 float robot::Gimbal::yawJoint() const
@@ -127,6 +144,8 @@ float robot::Gimbal::yawJoint() const
     return 0.0f;
   }
   /* angle() 是 [-π, π) 的关节角；减掉零点偏移后就是 δ（云台相对车头） */
+  if (feedback_valid_) return robot::WrapPi(yaw_feedback_ - kYawJointOffset);
+  CriticalSection lock;
   return robot::WrapPi(yaw_motor_->angle() - kYawJointOffset);
 }
 
@@ -135,6 +154,8 @@ float robot::Gimbal::pitchJoint() const
   if (pitch_motor_ == nullptr) {
     return 0.0f;
   }
+  if (feedback_valid_) return pitch_feedback_ - kPitchJointOffset;
+  CriticalSection lock;
   return pitch_motor_->angle() - kPitchJointOffset;
 }
 

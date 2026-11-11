@@ -29,13 +29,21 @@
 #include "ins_all.hpp"
 #include "motor.hpp"
 #include "robot.hpp"
+#include "tick.hpp"
+#include "can_tx_monitor.hpp"
+#include "critical_section.hpp"
 
 /* Private variables ---------------------------------------------------------*/
 static CAN_RxHeaderTypeDef rx_header1;
 static CAN_RxHeaderTypeDef rx_header2;
 static uint8_t can1_rx_data[8];
 static uint8_t can2_rx_data[8];
-static uint32_t p_tx_mailbox;
+static robot::CanTxMonitor s_tx_monitors[2];
+static robot::CanTxMonitor* TxMonitor(CAN_HandleTypeDef* hcan) {
+  if(hcan==&hcan1) return &s_tx_monitors[0];
+  if(hcan==&hcan2) return &s_tx_monitors[1];
+  return nullptr;
+}
 
 /* Private function prototypes -----------------------------------------------*/
 static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8]);
@@ -44,7 +52,9 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8]);
 
 void CanFilter_Init(CAN_HandleTypeDef *hcan)
 {
-  CAN_FilterTypeDef can_filter;
+  CAN_FilterTypeDef can_filter = {};
+  // F407两路CAN共享滤波器，0~13归CAN1、14~27归CAN2；禁止未初始化分界。
+  can_filter.SlaveStartFilterBank = 14;
 
   /* 全收：掩码全 0，任何 ID 均通过 */
   can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -75,17 +85,67 @@ bool CAN_Is_BusOff(const CAN_HandleTypeDef *hcan)
   return hcan == nullptr || (hcan->Instance->ESR & CAN_ESR_BOFF) != 0u;
 }
 
+bool CAN_AbortPendingTx(CAN_HandleTypeDef* hcan)
+{
+  auto* monitor=TxMonitor(hcan);
+  if(!monitor) return false;
+  const bool ok=HAL_CAN_AbortTxRequest(hcan,CAN_TX_MAILBOX0|CAN_TX_MAILBOX1|CAN_TX_MAILBOX2)==HAL_OK;
+  // HAL_OK只表示写入撤销请求；硬件全部邮箱空闲后才可忘记旧帧。
+  const uint32_t empty=CAN_TSR_TME0|(CAN_TSR_TME0<<1)|(CAN_TSR_TME0<<2);
+  const bool completed=ok && (hcan->Instance->TSR&empty)==empty;
+  if(completed) monitor->reset();
+  return completed;
+}
+
+bool CAN_TxHealthy(CAN_HandleTypeDef* hcan)
+{
+  auto* monitor=TxMonitor(hcan);
+  if(!monitor) return false;
+  const uint32_t tsr=hcan->Instance->TSR;
+  uint8_t pending=0,tx_ok=0;
+  for(int i=0;i<3;++i) {
+    if(!(tsr&(CAN_TSR_TME0<<i))) pending|=1u<<i;
+    if(tsr&(CAN_TSR_TXOK0<<(8*i))) tx_ok|=1u<<i;
+  }
+  const uint8_t completed=monitor->tracked()&uint8_t(~pending);
+  const bool ok=monitor->poll(pending,tx_ok,hello_world::tick::GetTickMs()) && !CAN_Is_BusOff(hcan);
+  // RQCP写1清除完成/错误标志，防止旧TXOK污染下一次相同邮箱的结果。
+  uint32_t clear=0;
+  for(int i=0;i<3;++i) if(completed&(1u<<i)) clear|=1u<<(8*i);
+  if(clear) hcan->Instance->TSR=clear; // RQCP为W1C；TME为只读，不改待发请求
+  if(!ok) (void)CAN_AbortPendingTx(hcan);
+  return ok;
+}
+
 bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
                   uint8_t len)
 {
-  CAN_TxHeaderTypeDef tx_header = {0};
-  tx_header.StdId = id;
-  tx_header.IDE = CAN_ID_STD;
-  tx_header.RTR = CAN_RTR_DATA;
-  tx_header.DLC = len;
-  /* 把 HAL 的结果如实返回：邮箱满 / 总线错误时这一帧**没发出去**，
-   * 调用方必须知道（尤其是急停时的零指令帧）。 */
-  return HAL_CAN_AddTxMessage(hcan, &tx_header, msg, &p_tx_mailbox) == HAL_OK;
+  if (!msg || len > 8 || id > 0x7FFu) return false;
+  robot::CriticalSection lock;
+  if (!CAN_TxHealthy(hcan)) return false;
+  if (hcan->State != HAL_CAN_STATE_READY && hcan->State != HAL_CAN_STATE_LISTENING)
+    return false;
+  auto* monitor = TxMonitor(hcan);
+  const uint32_t empty = hcan->Instance->TSR;
+  for (int slot = 0; slot < 3; ++slot) {
+    const uint8_t mask = uint8_t(1u << slot);
+    if (!(empty & (CAN_TSR_TME0 << slot)) || (monitor->tracked() & mask)) continue;
+    // 只选“硬件已空且软件已收回完成结果”的槽。HAL按实时CODE选槽时，
+    // 旧请求可能恰好完成并被HAL清掉TXOK，形成偶发误保护或遗漏失败。
+    // 以下标准帧寄存器顺序与STM32 HAL AddTxMessage一致，但槽位由监督器保留。
+    auto& mailbox = hcan->Instance->sTxMailBox[slot];
+    hcan->Instance->TSR = 1u << (8 * slot); // 仅清本槽旧RQCP（W1C）
+    mailbox.TIR = id << CAN_TI0R_STID_Pos;
+    mailbox.TDTR = len;
+    mailbox.TDLR = uint32_t(msg[0]) | (uint32_t(msg[1]) << 8) |
+        (uint32_t(msg[2]) << 16) | (uint32_t(msg[3]) << 24);
+    mailbox.TDHR = uint32_t(msg[4]) | (uint32_t(msg[5]) << 8) |
+        (uint32_t(msg[6]) << 16) | (uint32_t(msg[7]) << 24);
+    monitor->submitted(mask, hello_world::tick::GetTickMs()); // 先登记，再允许硬件完成
+    mailbox.TIR = uint32_t(mailbox.TIR) | CAN_TI0R_TXRQ;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -138,6 +198,13 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
 static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
 {
   robot::Robot *robot = GetRobot();
+
+  // 云台原始遥控帧：独立检查分片序号/CRC/DBUS，再原子提交完整输入。
+  auto* peer_comm = GetGimbalChassisComm();
+  if (peer_comm != nullptr && robot::DbusRelay::ownsId(std_id)) {
+    (void)peer_comm->remote_relay().accept(std_id, data, hello_world::tick::GetTickMs());
+    return;
+  }
 
   /* ---- 驱动电机 M3508：反馈 ID = 0x200 + id ---- */
   for (int i = 0; i < 4; ++i) {

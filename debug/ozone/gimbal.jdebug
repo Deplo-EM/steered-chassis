@@ -1,0 +1,24 @@
+// Ozone 3.26+ project for the assembled RoboMaster robot.
+// Opening this file only loads the ELF. No automatic connect/download/run.
+// Download & Reset resumes the CPU. Before starting, isolate actuator power,
+// turn on the remote in ESTOP, and identify the correct board.
+// Instructions: ../../docs/12-基地现场一页纸.md
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/steered_gimbal.elf");
+  // Read-only diagnostic expressions; enable live Refresh Rate after attaching.
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+  Watch.Add("robot::diag::g_cpu");
+  Watch.Add("s_dbus_valid_frames");
+  Watch.Add("s_dbus_invalid_frames");
+}

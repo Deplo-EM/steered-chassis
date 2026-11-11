@@ -1,0 +1,62 @@
+{
+  "Chassis": {
+    "before": {
+      "elf_sha256": "9FBB211A775DA2E19DE4152A33F59423828D44A454AD7E246B507ABAF6566E6C",
+      "bin_sha256": "3EF56311342455121FFA9865ECB2EEDDE948B9920C994716E3A506B67ECE1053",
+      "dwarf_versions": [
+        "5"
+      ],
+      "load_segments": [
+        "LOAD           0x001000 0x08000000 0x08000000 0x12424 0x12424 R E 0x1000",
+        "LOAD           0x014000 0x20000000 0x08012424 0x0064c 0x0064c RW  0x1000",
+        "LOAD           0x00064c 0x2000064c 0x2000064c 0x00000 0x01e44 RW  0x1000"
+      ]
+    },
+    "after_elf_sha256": "E5316CB442EBBF15FE91E4D8989A7B727CBC28BED4E522022C3CC958BC7DB59D",
+    "after_bin_sha256": "3EF56311342455121FFA9865ECB2EEDDE948B9920C994716E3A506B67ECE1053",
+    "dwarf_versions": [
+      "4"
+    ],
+    "line_table_versions": [
+      "3",
+      "4"
+    ],
+    "load_segments": [
+      "LOAD           0x001000 0x08000000 0x08000000 0x12424 0x12424 R E 0x1000",
+      "LOAD           0x014000 0x20000000 0x08012424 0x0064c 0x0064c RW  0x1000",
+      "LOAD           0x00064c 0x2000064c 0x2000064c 0x00000 0x01e44 RW  0x1000"
+    ],
+    "runtime_bin_identical": true,
+    "ozone_gui_verified": false
+  },
+  "Gimbal": {
+    "before": {
+      "elf_sha256": "DF62F424613FDA4BB17A88CD1F6B678058ACC7F3D7CB52EFC2650C3F054CFEF4",
+      "bin_sha256": "856727E884E92F3B377DB52CCB9A708CB5F3C9471C274356D66180FF565EB21D",
+      "dwarf_versions": [
+        "5"
+      ],
+      "load_segments": [
+        "LOAD           0x001000 0x08000000 0x08000000 0x0fd98 0x0fd98 R E 0x1000",
+        "LOAD           0x011000 0x20000000 0x0800fd98 0x00274 0x00274 RW  0x1000",
+        "LOAD           0x000274 0x20000274 0x20000274 0x00000 0x013b4 RW  0x1000"
+      ]
+    },
+    "after_elf_sha256": "9038A9EE074DFDFF847898536D7834BCEF7BEA7F7BF7FFCD568482AF98008AA4",
+    "after_bin_sha256": "856727E884E92F3B377DB52CCB9A708CB5F3C9471C274356D66180FF565EB21D",
+    "dwarf_versions": [
+      "4"
+    ],
+    "line_table_versions": [
+      "3",
+      "4"
+    ],
+    "load_segments": [
+      "LOAD           0x001000 0x08000000 0x08000000 0x0fd98 0x0fd98 R E 0x1000",
+      "LOAD           0x011000 0x20000000 0x0800fd98 0x00274 0x00274 RW  0x1000",
+      "LOAD           0x000274 0x20000274 0x20000274 0x00000 0x013b4 RW  0x1000"
+    ],
+    "runtime_bin_identical": true,
+    "ozone_gui_verified": false
+  }
+}

@@ -6,6 +6,8 @@
 #include "ins_pid.hpp"
 #include "motor_base.hpp"
 #include "pid.hpp"
+#include "critical_section.hpp"
+#include "remote_input.hpp"
 
 namespace {
 int checks = 0, failures = 0;
@@ -151,6 +153,19 @@ void TestFiniteBoundary() {
 }
 int main() {
   TestAlignment(); TestUniformSaturation(); TestPid(); TestFiniteBoundary();
+  current_case="nested critical sections restore the previous IRQ mask";
+  __set_PRIMASK(0);
+  { robot::CriticalSection outer; CHECK(__get_PRIMASK()==1);
+    { robot::CriticalSection inner; CHECK(__get_PRIMASK()==1); }
+    CHECK(__get_PRIMASK()==1); }
+  CHECK(__get_PRIMASK()==0);
+  __set_PRIMASK(1); { robot::CriticalSection locked; }
+  CHECK(__get_PRIMASK()==1); __set_PRIMASK(0);
+  current_case="remote deadband is continuous bounded and finite";
+  CHECK(robot::RemoteAxis(0.001515f)==0); CHECK(robot::RemoteAxis(-0.02f)==0);
+  CHECK(robot::RemoteAxis(1)==1); CHECK(robot::RemoteAxis(-2)==-1);
+  CHECK(robot::RemoteAxis(std::numeric_limits<float>::quiet_NaN())==0);
+  CHECK(robot::RemoteAxis(0.02001f)>0 && robot::RemoteAxis(0.02001f)<0.00002f);
   std::printf("Control regression: %d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

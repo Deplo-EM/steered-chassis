@@ -24,7 +24,7 @@
  *  6. 该电机上电时处于失能状态，需要通过发送指令使能电机，否则电机不会工作，当电机初始
  *  化中 auto_enable 为 true 时，当电机反馈表明电机失能时会自动使能电机，同时如果需要
  *  电机处于失能状态，则需要持续输入失能命令。若 auto_enable 为 false 时，需要手动使能
- *  电机。同时，当电机处于错误状态时，会自动清除错误并重启电机。上电后会一直发送使能指令，
+ *  电机。故障反馈会锁存并持续失能，禁止自动清错；排除根因后由人员按断电恢复流程操作。正常上电后发送使能指令，
  *  直到电机反馈使能成功。
  *  7. 电机为一发一收的通信方式，不给电机发送指令时电机不会反馈数据。
  *  8. 可额外获得的数据为转子温度 rotor_temp、MOS管温度 mos_temp 和状态码 status_code
@@ -186,6 +186,9 @@ bool DaMiao::decode(const uint8_t data[8])
 
 bool DaMiao::decodeFdb(const uint8_t* data)
 {
+  const uint8_t status = data[0] >> 4;
+  if ((data[0] & 0x0Fu) != motor_info_.id ||
+      !(status <= 1u || (status >= 8u && status <= 14u))) return false;
   uint16_t raw_angle = static_cast<uint16_t>((data[1] << 8) | data[2]);
   float angle = Uint2Float(raw_angle, kMaxAngle_, -kMaxAngle_, kAngleBits_);
   float last_angle = Uint2Float(
@@ -214,7 +217,7 @@ bool DaMiao::decodeFdb(const uint8_t* data)
   angle_ = normAngle(actual_ang - motor_info_.angle_offset);
   vel_raw_ = static_cast<float>(motor_info_.dir) *
              Uint2Float(
-                 static_cast<int16_t>((data[3] << 4) | (data[3] >> 4)),
+                 static_cast<int16_t>((data[3] << 4) | (data[4] >> 4)),
                  getMaxVel(), -getMaxVel(), kVelBits_) /
              motor_info_.redu_rat;
   vel_ = calcVel();
@@ -225,12 +228,13 @@ bool DaMiao::decodeFdb(const uint8_t* data)
   dm_status_.status_code = static_cast<StatusCode>(data[0] >> 4);
   last_raw_angle_ = raw_angle;
 
-  if (dm_status_.status_code == StatusCode::kMotorEnabled) {
-    dm_status_.is_enabled = true;
-  } else if (dm_status_.status_code == StatusCode::kMotorDisabled) {
-    dm_status_.is_enabled = false;
-  } else {
-    comm_data_.wait_to_handle_cmd = kClearErr;
+  if (status >= 8u) dm_status_.fault_latched = true;
+  dm_status_.is_enabled = status == 1u && !dm_status_.fault_latched;
+  if (dm_status_.fault_latched) {
+    // 不自动清除过温/过流等错误；故障帧仍可用于诊断，输出资格由isHealthy撤销。
+    torq_input_ = 0.0f;
+    raw_input_ = torq2Raw(0.0f);
+    comm_data_.wait_to_handle_cmd = kDisable;
   }
   return true;
 }
@@ -269,6 +273,11 @@ bool DaMiao::encode(uint8_t data[8])
 #pragma region
   HW_ASSERT(data, "data is nullptr");
 #pragma endregion
+
+  if (dm_status_.fault_latched) {
+    encodeCmd(data, kDisable);
+    return true;
+  }
 
   /* 自动使能 */
   if (!dm_status_.is_enabled &&
@@ -400,6 +409,11 @@ float DaMiao::torq2Raw(float torq) const
 
 Status DaMiao::setInput(float input)
 {
+  if (dm_status_.fault_latched || !std::isfinite(input)) {
+    torq_input_ = 0.0f;
+    raw_input_ = torq2Raw(0.0f);
+    return Status::kMotorFault;
+  }
   /* 只使用 MIT 模式的力矩部分 */
   comm_data_.target_ctrl_mode = CtrlMode::kMIT;
   comm_data_.pos_des = 0;
@@ -539,6 +553,8 @@ void DaMiao::init(uint8_t id,
 
   dm_status_ = DMStatus();
   comm_data_ = CommData();
+  // 重置结构体后再恢复固定MIT配置，避免将上面的配置覆盖为Unknown。
+  if (!enable_mode_switch_) dm_status_.current_ctrl_mode = CtrlMode::kMIT;
 }
 
 /* Private function definitions ----------------------------------------------*/

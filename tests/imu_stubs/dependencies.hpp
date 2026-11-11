@@ -11,19 +11,27 @@ inline float gyro[3] = {0.1f, -0.2f, 0.3f};
 inline float temperature = 25.0f;
 inline bool init_ok = true;
 inline int ahrs_updates = 0;
+inline uint32_t now=0, clock=100;
+}
+namespace hello_world::tick {
+inline uint32_t GetTickMs() { return imu_test::now; }
 }
 namespace hello_world::imu {
 struct BMI088HWConfig {};
 struct BMI088Config {};
 enum BMI088ErrState : uint8_t { kBMI088ErrStateNoErr = 0, kBMI088ErrStateAccNotFound = 1 };
+struct BMI088SampleInfo { uint32_t sensor_time=0; bool accel_ready=false,gyro_ready=false; };
 class BMI088 {
  public:
   void init(const BMI088HWConfig&, const float[9], const BMI088Config&) {}
   BMI088ErrState imuInit(bool) { return imu_test::init_ok ? kBMI088ErrStateNoErr : kBMI088ErrStateAccNotFound; }
-  void getData(float acc[3], float gyro[3], float* temperature) const {
+  bool getData(float acc[3], float gyro[3], float* temperature, BMI088SampleInfo* info=nullptr) const {
+    ++imu_test::now; imu_test::clock=(imu_test::clock+26)&0xFFFFFFu;
+    if(info) *info={imu_test::clock,true,true};
     std::memcpy(acc, imu_test::acc, sizeof(imu_test::acc));
     std::memcpy(gyro, imu_test::gyro, sizeof(imu_test::gyro));
     *temperature = imu_test::temperature;
+    return true;
   }
 };
 }

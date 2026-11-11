@@ -36,10 +36,12 @@
  */
 /* Includes ------------------------------------------------------------------*/
 #include "comm_task.hpp"
+#include "critical_section.hpp"
 
 #include "DT7.hpp"
 #include "HW_can.hpp"
 #include "can.h"
+#include "board_wiring.hpp"
 #include "dbus_check.hpp"
 #include "fault_injection.hpp"
 #include "gimbal_chassis_comm.hpp"
@@ -67,8 +69,8 @@ constexpr bool kDebugAlwaysFeedWatchdog = false;
 /** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
 constexpr uint32_t kDbusTimeoutMs = 100u;
 
-/** DBUS 接收缓冲区：固定 18 字节 */
-uint8_t s_dbus_buf[hello_world::remote_control::kRcRxDataLen];
+/** DBUS缓冲区36字节；仅接受IDLE边界18字节 */
+uint8_t s_dbus_buf[2u * hello_world::remote_control::kRcRxDataLen];
 
 /** 最近一帧「合法」DBUS 的时间戳（只由 UART 中断写） */
 volatile uint32_t s_last_valid_dbus_tick = 0;
@@ -77,6 +79,24 @@ volatile bool s_dbus_received = false;
 /** 统计：合法 / 非法帧数（调试用） */
 volatile uint32_t s_dbus_valid_frames = 0;
 volatile uint32_t s_dbus_invalid_frames = 0;
+volatile uint32_t s_dbus_rx_start_failures = 0;
+volatile uint32_t s_dbus_uart_errors = 0;
+volatile uint32_t s_dbus_partial_frames = 0;
+bool s_dbus_restart_pending = true;
+
+/** 普通DMA配合36字节缓冲，以IDLE收18字节帧；半满中断不能当成一帧。 */
+void StartDbusReceive()
+{
+  robot::CriticalSection lock;
+  if (!s_dbus_restart_pending) return;
+  if (HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf, sizeof(s_dbus_buf)) == HAL_OK) {
+    __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
+    s_dbus_restart_pending = false;
+  } else {
+    s_dbus_rx_start_failures = s_dbus_rx_start_failures + 1u;
+  }
+}
+
 
 /** CAN 发送失败计数（邮箱满 / 总线错误时会增长） */
 uint32_t s_can_tx_fail_count = 0;
@@ -87,24 +107,43 @@ uint8_t s_steer_frame[8];
 uint8_t s_comm_frame[8];
 
 /**
- * @brief 遥控数据是否足够新（决定这一周期能不能喂狗）
- * @note  两条合法来源：
- *        1. 本板自己收到过合法 DBUS 帧，且不超过 100ms；
- *        2. 云台板的帧说「它那边的遥控器在线」（接收机可能接在云台板）。
- *        注意第 2 条只用于**保活**，不用于授权控制：底盘板没有自己的遥控数据
- *        时仍然进不了 Working、输出仍然是 0。
+ * @brief 本地合法帧或云台完整转发帧足够新，才允许本周期喂狗。
+ * @note 云台在线标志本身不能保活，必须同时有完整18字节的新序号遥控帧。
  */
 bool RemoteAliveForWatchdog()
 {
+  robot::CriticalSection lock;
   const bool local =
       s_dbus_received &&
       ((hello_world::tick::GetTickMs() - s_last_valid_dbus_tick) <= kDbusTimeoutMs);
 
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   const bool peer = (comm != nullptr) && !comm->isOffline() &&
-                    comm->gimbal_data().dbus_online;
+                    comm->gimbal_data().dbus_online &&
+                    comm->remote_relay().online(hello_world::tick::GetTickMs());
 
   return local || peer;
+}
+
+bool EncodeMotor(hello_world::motor::Motor* motor, uint8_t* frame)
+{
+  robot::CriticalSection lock;
+  return motor != nullptr && motor->encode(frame);
+}
+
+bool s_previous_output=false;
+bool s_cancel_pending=false;
+/** 只在输出撤销沿撤销旧队列；取消失败保留请求，下周期继续重试。 */
+bool CancelOnStop(robot::Robot* controller)
+{
+  const bool allowed=controller!=nullptr && controller->outputPermitted();
+  if(s_previous_output && !allowed) s_cancel_pending=true;
+  s_previous_output=allowed;
+  if(!s_cancel_pending) return true;
+  const bool first=CAN_AbortPendingTx(&hcan1);
+  const bool second=CAN_AbortPendingTx(&hcan2);
+  if(first && second) s_cancel_pending=false;
+  return first && second;
 }
 
 }  // namespace
@@ -126,8 +165,7 @@ void CommTaskInit(void)
   HAL_CAN_ActivateNotification(&hcan2, CAN_IT_RX_FIFO1_MSG_PENDING);
 
   /* ---------- 2. 启动 DBUS 接收 ---------- */
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf,
-                               hello_world::remote_control::kRcRxDataLen);
+  StartDbusReceive();
 
   /* ---------- 3. 看门狗 ----------
    * IWDG 已经在 MX_IWDG_Init() 里启动（约 200ms 超时）。这里不喂，
@@ -136,8 +174,20 @@ void CommTaskInit(void)
 
 void CommTask(void)
 {
+  StartDbusReceive();
   // 不依赖错误中断是否开启，直接读取控制器的 bus-off 状态。
-  bool cycle_ok = !CAN_Is_BusOff(&hcan1) && !CAN_Is_BusOff(&hcan2);
+  robot::Robot* controller=GetRobot();
+  // 两路都轮询，不能用短路表达式让第二条总线的旧邮箱无人监督。
+  const bool tx_first=CAN_TxHealthy(&hcan1);
+  const bool tx_second=CAN_TxHealthy(&hcan2);
+  bool cycle_ok=tx_first && tx_second;
+  const bool failure_reported=controller && !cycle_ok;
+  if(failure_reported) controller->notifyCanTxCycle(false); // 编码前先清零
+  // 控制仍为1kHz；电机500Hz错相、状态200Hz，避免共享总线过载。
+  const uint32_t now = hello_world::tick::GetTickMs();
+  const bool stop_edge = s_previous_output && (controller == nullptr || !controller->outputPermitted());
+  const bool motor_due = (now % 2u) == 0u || stop_edge;
+  if(!CancelOnStop(controller)) cycle_ok=false;
   /* ---------- 故障注入：占满 CAN 发送邮箱 ----------
    * 连发 3 帧把 3 个邮箱占满，本周期真正的控制帧就会发送失败，
    * s_can_tx_fail_count 会增长。用来验证审计 H4 的"发送失败可检测"。 */
@@ -148,67 +198,84 @@ void CommTask(void)
     }
   }
 
-  /* ---------- 1. 下发驱动电机（4 台共用 0x200） ----------
-   * encode() 只会往缓冲区里「自己那 2 个字节」写数据（索引 = (id-1)%4），
-   * 所以 4 台电机依次编码到同一块缓冲区，最后发一帧即可。 */
-  for (uint8_t i = 0; i < 8; ++i) {
-    s_wheel_frame[i] = 0;
-  }
-  hello_world::motor::Motor* wheel0 = GetMotorWheel(0);
-  if (wheel0 == nullptr) cycle_ok = false;
-  if (wheel0 != nullptr) {
-    for (int i = 0; i < 4; ++i) {
-      hello_world::motor::Motor* motor = GetMotorWheel(i);
-      if (motor != nullptr) {
-        if (!motor->encode(s_wheel_frame)) cycle_ok = false;
-      } else { cycle_ok = false; }
+  static bool last_motor_submit_ok = true;
+  if (motor_due) {
+    bool motor_cycle_ok = true;
+    /* ---------- 1. 下发驱动电机（4 台共用 0x200） ----------
+     * encode() 只会往缓冲区里「自己那 2 个字节」写数据（索引 = (id-1)%4），
+     * 所以 4 台电机依次编码到同一块缓冲区，最后发一帧即可。 */
+    for (uint8_t i = 0; i < 8; ++i) {
+      s_wheel_frame[i] = 0;
     }
-    if (!CAN_Send_Msg(&hcan1, s_wheel_frame,
-                      hello_world::motor::M3508::GetTxId(wheel0->id()), 8)) {
-      ++s_can_tx_fail_count;
-      cycle_ok = false;
+    hello_world::motor::Motor* wheel0 = GetMotorWheel(0);
+    if (wheel0 == nullptr) motor_cycle_ok = false;
+    if (wheel0 != nullptr) {
+      for (int i = 0; i < 4; ++i) {
+        hello_world::motor::Motor* motor = GetMotorWheel(i);
+        if (motor != nullptr) {
+          if (!EncodeMotor(motor, s_wheel_frame)) motor_cycle_ok = false;
+        } else { motor_cycle_ok = false; }
+      }
+      if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kChassisWheel), s_wheel_frame,
+                        hello_world::motor::M3508::GetTxId(wheel0->id()), 8)) {
+        ++s_can_tx_fail_count;
+        motor_cycle_ok = false;
+      }
     }
-  }
 
-  /* ---------- 2. 下发转向电机（4 台共用 0x1FF 电压帧） ---------- */
-  for (uint8_t i = 0; i < 8; ++i) {
-    s_steer_frame[i] = 0;
-  }
-  hello_world::motor::Motor* steer0 = GetMotorSteer(0);
-  if (steer0 == nullptr) cycle_ok = false;
-  if (steer0 != nullptr) {
-    for (int i = 0; i < 4; ++i) {
-      hello_world::motor::Motor* motor = GetMotorSteer(i);
-      if (motor != nullptr) {
-        if (!motor->encode(s_steer_frame)) cycle_ok = false;
-      } else { cycle_ok = false; }
+    /* ---------- 2. 下发转向电机（4 台共用 0x1FF 电压帧） ---------- */
+    for (uint8_t i = 0; i < 8; ++i) {
+      s_steer_frame[i] = 0;
     }
-    if (!CAN_Send_Msg(&hcan2, s_steer_frame,
-                      hello_world::motor::GM6020::GetTxId(
-                          steer0->id(), steer0->get_input_type()),
-                      8)) {
-      ++s_can_tx_fail_count;
-      cycle_ok = false;
+    hello_world::motor::Motor* steer0 = GetMotorSteer(0);
+    if (steer0 == nullptr) motor_cycle_ok = false;
+    if (steer0 != nullptr) {
+      for (int i = 0; i < 4; ++i) {
+        hello_world::motor::Motor* motor = GetMotorSteer(i);
+        if (motor != nullptr) {
+          if (!EncodeMotor(motor, s_steer_frame)) motor_cycle_ok = false;
+        } else { motor_cycle_ok = false; }
+      }
+      if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kChassisSteer), s_steer_frame,
+                        hello_world::motor::GM6020::GetTxId(
+                            steer0->id(), steer0->get_input_type()),
+                        8)) {
+        ++s_can_tx_fail_count;
+        motor_cycle_ok = false;
+      }
     }
+
+    last_motor_submit_ok = motor_cycle_ok;
   }
+  cycle_ok = cycle_ok && last_motor_submit_ok;
 
   /* ---------- 3. 双板通信帧 ---------- */
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   if (comm == nullptr) cycle_ok = false;
-  if (comm != nullptr) {
+  static bool last_status_submit_ok = true;
+  static uint8_t previous_status = 0;
+  const auto* state = comm != nullptr ? &comm->chassis_data() : nullptr;
+  const uint8_t status = state == nullptr ? 0u : uint8_t(state->working | (state->estop<<1) |
+      (state->dbus_online<<2) | (state->imu_ready<<3));
+  if (comm != nullptr && ((now % 5u) == 0u || status != previous_status)) {
     comm->encode(s_comm_frame);
-    if (!CAN_Send_Msg(&hcan1, s_comm_frame, comm->tx_id(), 8)) {
+    if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kChassisPeer), s_comm_frame, comm->tx_id(), 8)) {
       ++s_can_tx_fail_count;
-      cycle_ok = false;
+      last_status_submit_ok = false;
+    } else {
+      last_status_submit_ok = true;
+      previous_status = status;
     }
   }
+  cycle_ok = cycle_ok && last_status_submit_ok;
 
   /* ---------- 4. 看门狗：整个周期都跑完了才喂 ----------
    * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
    * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。
    * 全板**只有这一个**喂狗调用点。 */
-  robot::Robot* controller = GetRobot();
-  if (controller != nullptr) controller->notifyCanTxCycle(cycle_ok);
+  if(controller && !failure_reported) controller->notifyCanTxCycle(cycle_ok);
+  if(!CancelOnStop(controller) && controller && !failure_reported && cycle_ok)
+    controller->notifyCanTxCycle(false);
   // 连续 10 ms 失败停止喂狗；恢复前仅尝试零输出。HAL_OK 不等于送达。
   const bool should_feed = kDebugAlwaysFeedWatchdog ||
       (controller != nullptr && controller->canFeedWatchdog() && RemoteAliveForWatchdog());
@@ -227,6 +294,7 @@ void CommTask(void)
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
+  if (huart != &huart3 || HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT) return;
   if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
     /* ---------- 故障注入：把拨轮两个字节改成 0xFC00 ----------
      * 低 11 位仍是 1024（正常中位），高 5 位是脏的。
@@ -257,6 +325,17 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
   }
 
   /* 重新启动下一轮接收。不重启的话只能收到第一帧。 */
-  HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf,
-                               hello_world::remote_control::kRcRxDataLen);
+  if (Size != hello_world::remote_control::kRcRxDataLen)
+    s_dbus_partial_frames = s_dbus_partial_frames + 1u;
+  s_dbus_restart_pending = true;
+  StartDbusReceive();
+}
+
+/** UART/DMA错误不能永久关闭接收；HAL结束错误传输后由下一控制周期重试。 */
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart)
+{
+  if (huart != &huart3) return;
+  s_dbus_uart_errors = s_dbus_uart_errors + 1u;
+  s_dbus_received = false;
+  s_dbus_restart_pending = true;
 }

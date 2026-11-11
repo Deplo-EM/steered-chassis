@@ -24,6 +24,7 @@
 #include "robot.hpp"
 
 #include <cmath>
+#include <cstring>
 
 #include "DT7.hpp"
 #include "chassis.hpp"
@@ -31,6 +32,7 @@
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "tick.hpp"
+#include "critical_section.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -67,7 +69,7 @@ constexpr float kAngularAccel = 25.0f;  ///< rad/s²
 
 /* ---------------- 跟随模式增益 ---------------- */
 /** 角度误差 → 目标角速度的比例（1/s）。Kp=4 表示误差 1rad 时目标转速 4rad/s，
- *  闭环时间常数约 0.25s，既跟得上又不会来回摆。 */
+ *  仅在理想角速度跟踪下约对应0.25s时间常数；实际阻尼和稳定性须实车验证。 */
 constexpr float kFollowKp = 4.0f;
 /** 用底盘陀螺仪角速度做阻尼：车已经在转了就少给一点，抑制过冲 */
 constexpr float kFollowKd = 0.15f;
@@ -132,9 +134,8 @@ void robot::Robot::update()
   }
 
   /* ---- 1. 更新传感器（IMU 必须每个周期都读，标定期间也要读） ----
-   * 故障注入 kImuFrozen：跳过采样，让数据停在上一帧。
-   * 这是为了**如实演示**审计 F3 的残留风险：读数冻结在"物理上合理的旧值"时，
-   * 本层的数值检查发现不了（isHealthy 仍然是 true）。 */
+   * kImuFrozen跳过采样；上一有效样本超过20ms后isSampleValid撤销输出资格。
+   * 设备时钟/DRDY冻结与SPI错误由真实采样路径另行监督。 */
   if (!robot::FaultActive(robot::FaultId::kImuFrozen)) {
     imu_->update();
   }
@@ -160,8 +161,8 @@ void robot::Robot::notifyRemoteRx()
 void robot::Robot::notifyCanTxCycle(bool success)
 {
   if (!initialized_) return;
-  const bool reset_ack = isRemoteOnline() && (rc_ != nullptr) &&
-      rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown;
+  const bool reset_ack = remote_input_.online &&
+      remote_input_.right == hello_world::remote_control::kSwitchStateDown;
   can_tx_guard_.update(success, reset_ack, hello_world::tick::GetTickMs());
   if (!can_tx_guard_.healthy()) {
     enterState(LifeState::kDead);
@@ -182,11 +183,13 @@ void robot::Robot::notifyMotorRx(int slot)
 
 bool robot::Robot::isRemoteOnline()
 {
-  return !rc_checker_.isOffline();
+  CriticalSection lock;
+  return remote_input_.online;
 }
 
 bool robot::Robot::areAllMotorsOnline()
 {
+  CriticalSection lock;
   for (int i = 0; i < kMotorSlotNum; ++i) {
     if (motor_checkers_[i].isOffline()) {
       return false;
@@ -200,17 +203,54 @@ float robot::Robot::delta() const
   if (comm_ == nullptr) {
     return 0.0f;
   }
-  return robot::WrapPi(comm_->gimbal_data().yaw_joint);
+  return robot::WrapPi(peer_input_.yaw_joint);
 }
 
 /* Private function definitions ----------------------------------------------*/
 
 void robot::Robot::updateInput()
 {
+  RemoteInput local, forwarded;
+  uint8_t forwarded_frame[18] = {};
+  bool forwarded_online = false;
+  {
+    CriticalSection lock;
+    local.capture(rc_, !rc_checker_.isOffline());
+    peer_input_ = comm_->gimbal_data();
+    peer_online_ = !comm_->isOffline();
+    const auto& relay = comm_->remote_relay();
+    forwarded_online = peer_online_ && peer_input_.dbus_online &&
+        relay.online(hello_world::tick::GetTickMs());
+    if (forwarded_online) std::memcpy(forwarded_frame, relay.frame(), 18);
+    motors_online_ = areAllMotorsOnline();
+    chassis_->captureFeedback();
+  }
+  // 继续使用同一个DT7解码器，避免跨板链路另造一套通道位宽/比例。
+  hello_world::remote_control::DT7 decoded;
+  if (forwarded_online) decoded.decode(forwarded_frame);
+  forwarded.capture(&decoded, forwarded_online);
+  local.normalize(); forwarded.normalize();
+  local_estop_ = local.online && local.right == hello_world::remote_control::kSwitchStateDown;
+
+  RemoteSource selected = remote_source_;
+  if ((selected == RemoteSource::kLocal && !local.online) ||
+      (selected == RemoteSource::kGimbal && !forwarded.online)) selected = RemoteSource::kNone;
+  if (selected == RemoteSource::kNone) {
+    // 新来源必须先给出有效急停档。另一接收机突然上线不能抢走运动指令。
+    if (local_estop_) selected = RemoteSource::kLocal;
+    else if (forwarded.online && forwarded.right == hello_world::remote_control::kSwitchStateDown)
+      selected = RemoteSource::kGimbal;
+  }
+  if (selected != remote_source_) {
+    remote_armed_ = false; ramped_.reset(); gimbal_yaw_rate_ = 0.0f;
+  }
+  remote_source_ = selected;
+  remote_input_ = selected == RemoteSource::kLocal ? local :
+      (selected == RemoteSource::kGimbal ? forwarded : RemoteInput{});
   mode_ = readModeSwitch();
   estop_ = readEstopSwitch();
-  if (!isRemoteOnline()) remote_armed_ = false;
-  else if (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown)
+  if (!remote_input_.online) remote_armed_ = false;
+  else if (remote_input_.right == hello_world::remote_control::kSwitchStateDown)
     remote_armed_ = true;
 }
 
@@ -219,7 +259,7 @@ robot::ChassisMode robot::Robot::readModeSwitch() const
   if (rc_ == nullptr) {
     return ChassisMode::kSeparate;
   }
-  switch (rc_->rc_l_switch()) {
+  switch (remote_input_.left) {
     case hello_world::remote_control::kSwitchStateUp:
       return ChassisMode::kSeparate;
     case hello_world::remote_control::kSwitchStateMid:
@@ -238,23 +278,23 @@ bool robot::Robot::readEstopSwitch() const
   }
   /* 右拨杆打到最下面 = 急停 */
   const bool local_estop =
-      (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown);
+      (remote_input_.right == hello_world::remote_control::kSwitchStateDown);
   /* 云台板那边如果判定急停（它自己也有遥控器），也一并对本板生效 */
   const bool peer_estop =
-      (comm_ != nullptr) ? comm_->gimbal_data().estop : false;
-  return local_estop || peer_estop;
+      peer_online_ ? peer_input_.estop : false;
+  return local_estop_ || local_estop || peer_estop;
 }
 
 void robot::Robot::updateStateMachine()
 {
-  const bool remote_ok = isRemoteOnline();
+  const bool remote_ok = remote_input_.online;
   /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
   const bool imu_ok =
       (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
-  const bool motors_ok = areAllMotorsOnline();
+  const bool motors_ok = motors_online_ && chassis_->feedbackHealthy();
   /* 对方在线且已经进入 Working：云台没准备好就不许开车（枪口会乱晃） */
   const bool peer_ok =
-      (comm_ != nullptr) && !comm_->isOffline() && comm_->gimbal_data().working;
+      peer_online_ && peer_input_.working;
   const bool all_ok = remote_ok && remote_armed_ && imu_ok && motors_ok && peer_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();
@@ -313,7 +353,7 @@ void robot::Robot::initWorkingTargets()
 
   /* pitch 目标从「当前实际角度」接着走：如果直接给 0，进入 Working 的瞬间
    * 云台会猛地甩回中位。这叫「无扰切换」。 */
-  gimbal_pitch_target_ = (comm_ != nullptr) ? comm_->gimbal_data().pitch_joint
+  gimbal_pitch_target_ = (comm_ != nullptr) ? peer_input_.pitch_joint
                                             : 0.0f;
   gimbal_pitch_target_ =
       robot::Clamp(gimbal_pitch_target_, kPitchLowerLimit, kPitchUpperLimit);
@@ -325,7 +365,7 @@ void robot::Robot::initWorkingTargets()
 
 void robot::Robot::generateCommand()
 {
-  const bool remote_ok = isRemoteOnline();
+  const bool remote_ok = remote_input_.online;
 
   /* ---------------- 平移：摇杆 → 云台坐标系速度 ----------------
    * UnitClamp：摇杆理论上在 [-1,1]，但上游一旦给出越界值（协议改动、
@@ -335,15 +375,15 @@ void robot::Robot::generateCommand()
   if (remote_ok) {
     /* 左摇杆向上（+）→ 沿云台 x 轴前进；
      * 左摇杆向右（+）→ 云台系 y 轴是「左」，所以取负。 */
-    raw.vx = UnitClamp(rc_->rc_lv()) * kMaxLinearSpeed;
-    raw.vy = -UnitClamp(rc_->rc_lh()) * kMaxLinearSpeed;
+    raw.vx = UnitClamp(remote_input_.lv) * kMaxLinearSpeed;
+    raw.vy = -UnitClamp(remote_input_.lh) * kMaxLinearSpeed;
   }
 
   /* ---------------- 旋转：按模式给 w ---------------- */
   switch (mode_) {
     case ChassisMode::kSeparate:
       /* 分离：底盘不自旋，w 直接由拨轮给（操作手想转多少就转多少） */
-      raw.w = remote_ok ? (UnitClamp(rc_->rc_wheel()) * kMaxChassisW) : 0.0f;
+      raw.w = remote_ok ? (UnitClamp(remote_input_.wheel) * kMaxChassisW) : 0.0f;
       break;
 
     case ChassisMode::kFollow: {
@@ -359,7 +399,7 @@ void robot::Robot::generateCommand()
     case ChassisMode::kSpin: {
       /* 小陀螺：必须有非零旋转分量。
        * 拨轮大小决定转速，正负决定转向；拨轮回中时用最小转速继续转。 */
-      const float wheel = remote_ok ? UnitClamp(rc_->rc_wheel()) : 0.0f;
+      const float wheel = remote_ok ? UnitClamp(remote_input_.wheel) : 0.0f;
       const float magnitude =
           kMinSpinW + std::fabs(wheel) * (kMaxSpinW - kMinSpinW);
       const float direction = (wheel < -0.05f) ? -1.0f : 1.0f;
@@ -405,19 +445,19 @@ void robot::Robot::generateCommand()
 
 void robot::Robot::updateGimbalCommand()
 {
-  if (rc_ == nullptr || !isRemoteOnline()) {
+  if (!remote_input_.online) {
     gimbal_yaw_rate_ = 0.0f;
     return;
   }
 
   /* 右摇杆向右（+）→ 云台顺时针转 → yaw 角减小（逆时针为正） */
-  gimbal_yaw_rate_ = -UnitClamp(rc_->rc_rh()) * kMaxGimbalYawRate;
+  gimbal_yaw_rate_ = -UnitClamp(remote_input_.rh) * kMaxGimbalYawRate;
   gimbal_yaw_rate_ =
       robot::Clamp(gimbal_yaw_rate_, -kMaxGimbalYawRate, kMaxGimbalYawRate);
 
   /* 右摇杆向上（+）→ 枪口抬高。这里给的是「关节角目标」，由云台板做位置环。 */
   gimbal_pitch_target_ +=
-      UnitClamp(rc_->rc_rv()) * kPitchStickSign * kGimbalPitchRate * kDt;
+      UnitClamp(remote_input_.rv) * kPitchStickSign * kGimbalPitchRate * kDt;
   gimbal_pitch_target_ =
       robot::Clamp(gimbal_pitch_target_, kPitchLowerLimit, kPitchUpperLimit);
 }
@@ -433,7 +473,7 @@ void robot::Robot::applyOutput()
     ramped_.reset();
     gimbal_yaw_rate_ = 0.0f;
     // 急停期间重新同步 pitch，解除时不释放急停前残留目标。
-    gimbal_pitch_target_ = comm_->gimbal_data().pitch_joint;
+    gimbal_pitch_target_ = peer_input_.pitch_joint;
     return;
   }
 
@@ -462,7 +502,7 @@ void robot::Robot::updateCommData()
   GimbalChassisComm::ChassisData& d = comm_->chassis_data();
   d.working = (state_ == LifeState::kWorking);
   d.estop = estop_;
-  d.dbus_online = isRemoteOnline();
+  d.dbus_online = remote_input_.online;
   d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   d.gimbal_enable = d.working && !estop_;
   d.mode = mode_;

@@ -29,6 +29,7 @@
 #include "gimbal_chassis_comm.hpp"
 #include "imu.hpp"
 #include "tick.hpp"
+#include "critical_section.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -99,8 +100,7 @@ void robot::Robot::notifyRemoteRx()
 void robot::Robot::notifyCanTxCycle(bool success)
 {
   if (!initialized_) return;
-  const bool reset_ack = (comm_ != nullptr) && !comm_->isOffline() &&
-      comm_->chassis_data().dbus_online && comm_->chassis_data().estop;
+  const bool reset_ack = peer_online_ && peer_input_.dbus_online && peer_input_.estop;
   can_tx_guard_.update(success, reset_ack, hello_world::tick::GetTickMs());
   if (!can_tx_guard_.healthy()) {
     enterState(LifeState::kDead);
@@ -119,11 +119,13 @@ void robot::Robot::notifyMotorRx(int slot)
 
 bool robot::Robot::isRemoteOnline()
 {
+  CriticalSection lock;
   return !rc_checker_.isOffline();
 }
 
 bool robot::Robot::areAllMotorsOnline()
 {
+  CriticalSection lock;
   for (int i = 0; i < kMotorSlotNum; ++i) {
     if (motor_checkers_[i].isOffline()) {
       return false;
@@ -136,26 +138,35 @@ bool robot::Robot::areAllMotorsOnline()
 
 void robot::Robot::updateInput()
 {
+  {
+    CriticalSection lock;
+    remote_input_.capture(rc_, !rc_checker_.isOffline());
+    peer_input_ = comm_->chassis_data();
+    peer_online_ = !comm_->isOffline();
+    motors_online_ = areAllMotorsOnline();
+    gimbal_->captureFeedback();
+  }
+  remote_input_.normalize();
   /* 本地急停：只有「本板确实有遥控器且在线」时才采信它的拨杆，
    * 否则云台板没接收机时会被误判成一直急停。 */
   const bool local_estop =
-      (rc_ != nullptr) && isRemoteOnline() &&
-      (rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown);
+      remote_input_.online &&
+      (remote_input_.right == hello_world::remote_control::kSwitchStateDown);
 
   /* 底盘板下发的急停（底盘板那边已经把自己遥控器的急停算进去了） */
   const bool peer_estop =
-      (comm_ != nullptr) ? comm_->chassis_data().estop : true;
+      peer_online_ ? peer_input_.estop : true;
 
   estop_ = local_estop || peer_estop;
 }
 
 void robot::Robot::updateStateMachine()
 {
-  const bool comm_ok = (comm_ != nullptr) && !comm_->isOffline();
+  const bool comm_ok = peer_online_;
   /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
   const bool imu_ok =
       (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
-  const bool motors_ok = areAllMotorsOnline();
+  const bool motors_ok = motors_online_ && gimbal_->feedbackHealthy();
   const bool all_ok = comm_ok && imu_ok && motors_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();
@@ -219,7 +230,7 @@ void robot::Robot::applyOutput(float dt)
   }
 
   /* 接收端独立核对授权条件，不能只信任对板的一个 enable 位。 */
-  const auto command = comm_->chassis_data();
+  const auto& command = peer_input_;
   const bool enabled = command.alive && command.working && command.dbus_online &&
                        command.imu_ready && command.gimbal_enable && !command.estop;
   if (!enabled) {
@@ -232,7 +243,7 @@ void robot::Robot::applyOutput(float dt)
   if (!output_enabled_prev_) {
     yaw_target_world_ = imu_->yaw();          ///< 世界系目标 = 当前朝向
     gimbal_->setPitchTarget(gimbal_->pitchJoint());  ///< pitch 目标 = 当前角度
-    gimbal_->stop();  ///< 清 PID 积分，避免上一轮的积分突然释放
+    gimbal_->resetControllers();  ///< 清历史但保留输入阶段的反馈快照
     output_enabled_prev_ = true;
   }
 
@@ -260,9 +271,9 @@ void robot::Robot::updateCommData()
   GimbalChassisComm::GimbalData& d = comm_->gimbal_data();
   d.working = (state_ == LifeState::kWorking);
   // 只回传本地急停；C2G 的组合急停不能回显，否则两板会互相锁住急停。
-  d.estop = isRemoteOnline() && rc_ != nullptr &&
-            rc_->rc_r_switch() == hello_world::remote_control::kSwitchStateDown;
-  d.dbus_online = isRemoteOnline();
+  d.estop = remote_input_.online &&
+            remote_input_.right == hello_world::remote_control::kSwitchStateDown;
+  d.dbus_online = remote_input_.online;
   d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   d.pitch_at_limit = gimbal_->pitchAtLimit();
   d.yaw_joint = gimbal_->yawJoint();

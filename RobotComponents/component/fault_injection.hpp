@@ -53,7 +53,7 @@ enum class FaultId : uint32_t {
   kNone = 0,            ///< 不注入（默认）
   kHangControlLoop = 1, ///< 控制任务死循环：验证看门狗能否在 ~200ms 复位
   kInvalidDbusWheel = 2,///< 把 DBUS 拨轮改成 0xFC00：验证非法帧不会授权输出
-  kImuFrozen = 3,       ///< 冻结 IMU 采样：验证"读数冻结"这一残留风险
+  kImuFrozen = 3,       ///< 跳过IMU更新：验证上一样本超过20ms失效
   kCanTxStarve = 4,     ///< 占满 CAN 发送邮箱：验证发送失败可被计数
 };
 

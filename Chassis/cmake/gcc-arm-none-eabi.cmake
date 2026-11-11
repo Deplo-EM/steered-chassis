@@ -29,7 +29,9 @@ set(TARGET_FLAGS "-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard ")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TARGET_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic -fdata-sections -ffunction-sections")
 if(CMAKE_BUILD_TYPE MATCHES Debug)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g3")
+    # Ozone 3.26: explicit DWARF4 avoids GCC15 loclists/line-table parser warnings.
+    # Debug metadata only; optimization and runtime behavior remain unchanged.
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g3 -gdwarf-4 -gstrict-dwarf")
 endif()
 if(CMAKE_BUILD_TYPE MATCHES Release)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os -g0")

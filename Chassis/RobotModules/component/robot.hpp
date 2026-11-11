@@ -39,6 +39,8 @@
 
 #include "module_state.hpp"
 #include "can_tx_guard.hpp"
+#include "remote_input.hpp"
+#include "gimbal_chassis_comm.hpp"
 #include "offline_checker.hpp"
 
 namespace hello_world {
@@ -102,6 +104,8 @@ class Robot {
   bool isEstopped() const { return estop_; }
   bool isRemoteOnline();
   bool areAllMotorsOnline();
+  /** 本周期下发资格，用于通信层停机沿撤销旧队列。 */
+  bool outputPermitted() const { return state_ == LifeState::kWorking && !estop_; }
 
   /** 当前（已做加速度限幅的）云台系速度指令 */
   const ChassisMotion& motion() const { return ramped_; }
@@ -139,11 +143,18 @@ class Robot {
   uint32_t state_enter_tick_ = 0;
   bool initialized_ = false;
   CanTxGuard can_tx_guard_;
+  RemoteInput remote_input_;
+  GimbalChassisComm::GimbalData peer_input_;
+  bool peer_online_ = false;
+  bool motors_online_ = false;
 
   /* 指令 */
   ChassisMode mode_ = ChassisMode::kSeparate;
   bool estop_ = false;
-  bool remote_armed_ = false;  ///< 上电/遥控失联/发送失败后需本地急停确认
+  bool remote_armed_ = false;  ///< 上电/遥控失联/发送失败后需当前来源急停确认
+  enum class RemoteSource : uint8_t { kNone, kLocal, kGimbal };
+  RemoteSource remote_source_ = RemoteSource::kNone; ///< 来源只能通过新来源急停确认选定
+  bool local_estop_ = false; ///< 即使当前使用云台遥控，本地有效急停仍有最高优先级
   ChassisMotion ramped_;  ///< 加速度限幅后的云台系速度指令
   float gimbal_yaw_rate_ = 0.0f;
   float gimbal_pitch_target_ = 0.0f;

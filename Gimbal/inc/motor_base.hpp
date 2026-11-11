@@ -62,6 +62,7 @@ enum class Status : uint8_t {
   kOk,                  ///* 正常
   kInputValueOverflow,  ///* 输入溢出
   kInputTypeError,      ///* 输入类型错误
+  kMotorFault,          ///* 电机故障锁存，拒绝出力
 };
 
 enum class InputType : uint8_t {
@@ -160,6 +161,9 @@ class Motor
    * @note        新人需先在自己的 CAN 层根据反馈 ID 判断报文归属，再调用此接口
    */
   virtual bool decode(const uint8_t data[8]) = 0;
+
+  /** 输出资格，不等同于收到反馈；普通电机由上层在线检测，故障设备可覆盖。 */
+  virtual bool isHealthy() const { return true; }
 
   /**
    * @brief       将期望输入编码为 8 字节 CAN 控制报文

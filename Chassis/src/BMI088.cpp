@@ -263,35 +263,44 @@ void BMI088::init(const BMI088HWConfig &hw_config,
 
 BMI088ErrState BMI088::imuInit(bool self_test) const
 {
+  io_ok_ = true;
   BMI088ErrState err_state = kBMI088ErrStateNoErr;
 
   SetBits(gyroInit(self_test), err_state);
   SetBits(accInit(self_test), err_state);
 
+  if (!io_ok_) SetBits(kBMI088ErrStateSpi, err_state);
   return err_state;
 }
 
-void BMI088::getData(
-    float acc_data[3], float gyro_data[3], float *temp_ptr) const
+bool BMI088::getData(float acc_data[3], float gyro_data[3], float* temp_ptr,
+                     BMI088SampleInfo* info) const
 {
-  float tmp_data[3];
-
+  io_ok_ = true;
+  BMI088SampleInfo sample_info;
+  if (info != nullptr) {
+    sample_info.accel_ready = (accRead(BMI088_ACC_ACC_STATUS) & BMI088_ACC_ACC_STATUS_ACC_DRDY) != 0;
+    sample_info.gyro_ready = (gyroRead(BMI088_GYRO_GYRO_INT_STAT_1) & BMI088_GYRO_GYRO_INT_STAT_1_GYRO_DRDY) != 0;
+    uint8_t time[3] = {};
+    accMultiRead(BMI088_ACC_SENSORTIME_0, 3, time);
+    sample_info.sensor_time = uint32_t(time[0]) | (uint32_t(time[1])<<8) | (uint32_t(time[2])<<16);
+  }
+  float tmp[3], acc[3] = {}, gyro[3] = {}, temperature = 0;
   if (acc_data != nullptr) {
-    tick::DelayUs(kCommWaitTimeUs);
-    getAccData(tmp_data);
-    arm_mat_vec_mult_f32(&rot_mat_, tmp_data, acc_data);
+    tick::DelayUs(kCommWaitTimeUs); getAccData(tmp);
+    arm_mat_vec_mult_f32(&rot_mat_, tmp, acc);
   }
-
   if (gyro_data != nullptr) {
-    tick::DelayUs(kCommWaitTimeUs);
-    getGyroData(tmp_data);
-    arm_mat_vec_mult_f32(&rot_mat_, tmp_data, gyro_data);
+    tick::DelayUs(kCommWaitTimeUs); getGyroData(tmp);
+    arm_mat_vec_mult_f32(&rot_mat_, tmp, gyro);
   }
-
-  if (temp_ptr != nullptr) {
-    tick::DelayUs(kCommWaitTimeUs);
-    *temp_ptr = getTemp();
-  }
+  if (temp_ptr != nullptr) { tick::DelayUs(kCommWaitTimeUs); temperature=getTemp(); }
+  if (!io_ok_) return false;
+  if (acc_data) memcpy(acc_data, acc, sizeof(acc));
+  if (gyro_data) memcpy(gyro_data, gyro, sizeof(gyro));
+  if (temp_ptr) *temp_ptr=temperature;
+  if (info) *info=sample_info;
+  return true;
 }
 
 BMI088ErrState BMI088::accInit(bool self_test) const
@@ -360,12 +369,13 @@ BMI088ErrState BMI088::gyroInit(bool self_test) const
   /* 配置一些寄存器 */
   uint8_t gyro_bandwidth = config_.gyro_odr_fbw |
                            BMI088_GYRO_GYRO_BANDWIDTH_MUST_SET;
-  uint8_t gyro_init_config[3][2] = {
+  uint8_t gyro_init_config[4][2] = {
       {BMI088_GYRO_GYRO_RANGE, config_.gyro_range},
       {BMI088_GYRO_GYRO_BANDWIDTH, gyro_bandwidth},
-      {BMI088_GYRO_GYRO_LPM1, BMI088_GYRO_GYRO_LPM1_NORMAL}};
+      {BMI088_GYRO_GYRO_LPM1, BMI088_GYRO_GYRO_LPM1_NORMAL},
+      {BMI088_GYRO_GYRO_INT_CTRL, BMI088_GYRO_GYRO_INT_CTRL_DRDY_IT_EN}};
 
-  for (uint8_t i = 0; i < 3; i++) {
+  for (uint8_t i = 0; i < 4; i++) {
     tick::DelayUs(kCommWaitTimeUs);
     gyroWrite(gyro_init_config[i][0], gyro_init_config[i][1]);
     tick::DelayUs(kCheckWaitTimeUs);
@@ -444,7 +454,7 @@ BMI088ErrState BMI088::gyroSelfTest(void) const
 
 void BMI088::getGyroData(float gyro_data[3]) const
 {
-  uint8_t gyro_raw_data[kGyroRawDataLen];
+  uint8_t gyro_raw_data[kGyroRawDataLen] = {};
   gyroMultiRead(BMI088_GYRO_RATE_X_LSB, kGyroRawDataLen, gyro_raw_data);
 
   for (uint8_t i = 0; i < 3; i++) {
@@ -456,7 +466,7 @@ void BMI088::getGyroData(float gyro_data[3]) const
 
 void BMI088::getAccData(float acc_data[3]) const
 {
-  uint8_t acc_raw_data[kAccRawDataLen];
+  uint8_t acc_raw_data[kAccRawDataLen] = {};
   accMultiRead(BMI088_ACC_ACC_X_LSB, kAccRawDataLen, acc_raw_data);
 
   for (uint8_t i = 0; i < 3; i++) {
@@ -468,7 +478,7 @@ void BMI088::getAccData(float acc_data[3]) const
 
 float BMI088::getTemp(void) const
 {
-  uint8_t temp_raw_data[kTempRawDataLen];
+  uint8_t temp_raw_data[kTempRawDataLen] = {};
   accMultiRead(BMI088_ACC_TEMP_MSB, kTempRawDataLen, temp_raw_data);
 
   int16_t temp_raw =
@@ -486,15 +496,15 @@ void BMI088::gyroWrite(uint8_t mem_addr, uint8_t value) const
 {
   uint8_t tx_data[2] = {mem_addr |= kWriteSign, value};
   gyroCsL();
-  HAL_SPI_Transmit(hspi_, tx_data, 2, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_Transmit(hspi_, tx_data, 2, kSpiTimeout) != HAL_OK) io_ok_ = false;
   gyroCsH();
 }
 
 uint8_t BMI088::gyroRead(uint8_t mem_addr) const
 {
-  uint8_t rx_data[2], tx_data[2] = {mem_addr |= kReadSign, kPaddingValue};
+  uint8_t rx_data[2] = {}, tx_data[2] = {mem_addr |= kReadSign, kPaddingValue};
   gyroCsL();
-  HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 2, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 2, kSpiTimeout) != HAL_OK) io_ok_ = false;
   gyroCsH();
 
   return rx_data[1];
@@ -505,8 +515,8 @@ void BMI088::gyroMultiRead(
 {
   gyroCsL();
   start_mem_addr |= kReadSign;
-  HAL_SPI_Transmit(hspi_, &start_mem_addr, 1, kSpiTimeout);
-  HAL_SPI_TransmitReceive(hspi_, kPaddingData, rx_data, len, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_Transmit(hspi_, &start_mem_addr, 1, kSpiTimeout) != HAL_OK) io_ok_ = false;
+  if (io_ok_ && HAL_SPI_TransmitReceive(hspi_, kPaddingData, rx_data, len, kSpiTimeout) != HAL_OK) io_ok_ = false;
   gyroCsH();
 }
 
@@ -514,16 +524,16 @@ void BMI088::accWrite(uint8_t mem_addr, uint8_t value) const
 {
   uint8_t pTxData[2] = {mem_addr |= kWriteSign, value};
   accCsL();
-  HAL_SPI_Transmit(hspi_, pTxData, 2, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_Transmit(hspi_, pTxData, 2, kSpiTimeout) != HAL_OK) io_ok_ = false;
   accCsH();
 }
 
 uint8_t BMI088::accRead(uint8_t mem_addr) const
 {
-  uint8_t rx_data[3], tx_data[3] = {
+  uint8_t rx_data[3] = {}, tx_data[3] = {
                           mem_addr |= kReadSign, kPaddingValue, kPaddingValue};
   accCsL();
-  HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 3, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 3, kSpiTimeout) != HAL_OK) io_ok_ = false;
   accCsH();
 
   return rx_data[2];
@@ -535,8 +545,8 @@ void BMI088::accMultiRead(
   uint8_t tx_data[2] = {start_mem_addr |= kReadSign, kPaddingValue};
 
   accCsL();
-  HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 2, kSpiTimeout);
-  HAL_SPI_TransmitReceive(hspi_, kPaddingData, rx_data, len, kSpiTimeout);
+  if (io_ok_ && HAL_SPI_TransmitReceive(hspi_, tx_data, rx_data, 2, kSpiTimeout) != HAL_OK) io_ok_ = false;
+  if (io_ok_ && HAL_SPI_TransmitReceive(hspi_, kPaddingData, rx_data, len, kSpiTimeout) != HAL_OK) io_ok_ = false;
   accCsH();
 }
 /* Private function definitions ----------------------------------------------*/

@@ -293,6 +293,13 @@ class DaMiao : public Motor
   // 电机是否使能
   bool is_enabled(void) const { return dm_status_.is_enabled; }
 
+  /** 故障锁存只能由重新初始化/上电清除；之后仍需上层重新授权。 */
+  bool faultLatched() const { return dm_status_.fault_latched; }
+  bool isHealthy() const override {
+    return !dm_status_.fault_latched && dm_status_.is_enabled &&
+           dm_status_.status_code == StatusCode::kMotorEnabled;
+  }
+
   // 电机当前控制模式
   CtrlMode current_ctrl_mode(void) const { return dm_status_.current_ctrl_mode; }
 
@@ -412,6 +419,7 @@ class DaMiao : public Motor
 
   /* 电机状态 */
   struct DMStatus {
+    bool fault_latched = false;  ///< 过流/过温等故障禁止自动清错和使能
     uint8_t rotor_temp = 0;                               ///* 电机转子温度
     uint8_t mos_temp = 0;                                 ///* 电机MOS管温度
     bool is_enabled = false;                              ///* 电机是否使能

@@ -10,7 +10,7 @@
  *  ★ 两个片选引脚如果接反，现象是 imuInit() 返回「加速度计未找到」★
  *  BMI088 有两个独立片选（加速度计 CS、陀螺仪 CS）。本车 SPI1 引脚：
  *  SCK=PB3 / MISO=PB4 / MOSI=PA7，两个片选是 PA4 与 PB0。
- *  如果 errorState() 非 0、或姿态一直不动，就把下面两个 CS 对调。
+ *  errorState非0或姿态异常时先查供电、SPI和芯片ID；仅在原理图证实接反后修正CS。
  *
  *  安装方向：若 IMU 不是「x 朝前、y 朝左、z 朝上」安装的，改传给 init() 的
  *  旋转矩阵（默认单位矩阵 kImuDefaultRotMat）。

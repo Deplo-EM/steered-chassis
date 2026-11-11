@@ -76,6 +76,9 @@ class Chassis {
    * @param dt 控制周期，单位 s
    */
   void update(float dt);
+  /** 与遥控/对板在同一短临界区采集；纯模块调用时update会自行采集。 */
+  void captureFeedback();
+  bool feedbackHealthy() const { return feedback_healthy_; }
 
   /**
    * @brief 所有电机输出归零（急停 / 未就绪 / 掉线时调用）
@@ -104,6 +107,10 @@ class Chassis {
   ChassisMotion zero_motion_;  ///< 空对象，solver_ 为空时返回它
   float delta_ = 0.0f;    ///< 云台相对车头偏航角
   bool ready_ = false;
+  bool feedback_pending_ = false;
+  bool feedback_healthy_ = false;
+  float steer_feedback_[kWheelNum] = {};
+  float wheel_velocity_[kWheelNum] = {};
 };
 
 }  // namespace robot

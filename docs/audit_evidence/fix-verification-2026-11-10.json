@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-10",
+  "baseline": "2eee2a6",
+  "host_assertions_per_shell": 1149,
+  "host_failures": 0,
+  "hardware_tests_executed": false,
+  "artifacts": {
+    "Chassis": {
+      "elf_sha256": "9FBB211A775DA2E19DE4152A33F59423828D44A454AD7E246B507ABAF6566E6C",
+      "bin_sha256": "3EF56311342455121FFA9865ECB2EEDDE948B9920C994716E3A506B67ECE1053",
+      "build_tag": "SAFE-BUILD",
+      "ram_bytes": 9360,
+      "flash_bytes": 76400,
+      "load_segments": [
+        "LOAD           0x001000 0x08000000 0x08000000 0x12424 0x12424 R E 0x1000",
+        "LOAD           0x014000 0x20000000 0x08012424 0x0064c 0x0064c RW  0x1000",
+        "LOAD           0x00064c 0x2000064c 0x2000064c 0x00000 0x01e44 RW  0x1000"
+      ]
+    },
+    "Gimbal": {
+      "elf_sha256": "DF62F424613FDA4BB17A88CD1F6B678058ACC7F3D7CB52EFC2650C3F054CFEF4",
+      "bin_sha256": "856727E884E92F3B377DB52CCB9A708CB5F3C9471C274356D66180FF565EB21D",
+      "build_tag": "SAFE-BUILD",
+      "ram_bytes": 5672,
+      "flash_bytes": 65548,
+      "load_segments": [
+        "LOAD           0x001000 0x08000000 0x08000000 0x0fd98 0x0fd98 R E 0x1000",
+        "LOAD           0x011000 0x20000000 0x0800fd98 0x00274 0x00274 RW  0x1000",
+        "LOAD           0x000274 0x20000274 0x20000274 0x00000 0x013b4 RW  0x1000"
+      ]
+    }
+  }
+}

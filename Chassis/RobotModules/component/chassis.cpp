@@ -26,6 +26,7 @@
 #include <cmath>
 
 #include "motor_base.hpp"
+#include "critical_section.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 /* Private types -------------------------------------------------------------*/
@@ -75,17 +76,33 @@ const hello_world::chassis_ik_solver::WheelCommand& robot::Chassis::wheelCommand
   return solver_->command(index);
 }
 
+void robot::Chassis::captureFeedback()
+{
+  CriticalSection lock;
+  feedback_healthy_ = ready_;
+  for (int i=0;i<kWheelNum;++i) {
+    if (!wheels_[i] || !steers_[i]) { feedback_healthy_=false; continue; }
+    steer_feedback_[i]=steers_[i]->angle();
+    wheel_velocity_[i]=wheels_[i]->vel();
+    feedback_healthy_ = feedback_healthy_ && wheels_[i]->isHealthy() && steers_[i]->isHealthy();
+  }
+  feedback_pending_=true;
+}
+
 void robot::Chassis::update(float dt)
 {
   if (!ready_) {
     return;
   }
 
+  if (!feedback_pending_) captureFeedback();
+  feedback_pending_=false;
+  if (!feedback_healthy_) { stop(); return; }
   // 先读取并检查整组反馈，再算全部输出；任一数值异常都不能只停一只轮。
   float steer_now[kWheelNum], wheel_velocity[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
-    steer_now[i] = steers_[i]->angle();
-    wheel_velocity[i] = wheels_[i]->vel();
+    steer_now[i] = steer_feedback_[i];
+    wheel_velocity[i] = wheel_velocity_[i];
     if (!std::isfinite(steer_now[i]) || !std::isfinite(wheel_velocity[i])) {
       stop(); return;
     }
@@ -119,6 +136,7 @@ void robot::Chassis::update(float dt)
 
 void robot::Chassis::stop()
 {
+  feedback_pending_=false;
   motion_.reset();
   delta_ = 0.0f;
   for (int i = 0; i < kWheelNum; ++i) {
