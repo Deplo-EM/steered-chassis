@@ -33,6 +33,7 @@
 #include "imu.hpp"
 #include "tick.hpp"
 #include "critical_section.hpp"
+#include "basic_mode.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -288,13 +289,17 @@ bool robot::Robot::readEstopSwitch() const
 void robot::Robot::updateStateMachine()
 {
   const bool remote_ok = remote_input_.online;
-  /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
+#if ROBOT_BASIC_MODE
+  /* ★ 基本功能模式 ★ 运行期只要求零漂标定完成；并且不等云台先 Working。 */
+  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  const bool motors_ok = motors_online_ && chassis_->feedbackHealthy();
+  const bool peer_ok = true;
+#else
   const bool imu_ok =
       (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   const bool motors_ok = motors_online_ && chassis_->feedbackHealthy();
-  /* 对方在线且已经进入 Working：云台没准备好就不许开车（枪口会乱晃） */
-  const bool peer_ok =
-      peer_online_ && peer_input_.working;
+  const bool peer_ok = peer_online_ && peer_input_.working;
+#endif
   const bool all_ok = remote_ok && remote_armed_ && imu_ok && motors_ok && peer_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();

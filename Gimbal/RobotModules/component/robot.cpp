@@ -30,6 +30,7 @@
 #include "imu.hpp"
 #include "tick.hpp"
 #include "critical_section.hpp"
+#include "basic_mode.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -163,9 +164,13 @@ void robot::Robot::updateInput()
 void robot::Robot::updateStateMachine()
 {
   const bool comm_ok = peer_online_;
-  /* 标定完成 **且** 当前数据合理：传感器中途坏了也要回 Dead（审计 M3） */
+#if ROBOT_BASIC_MODE
+  /* ★ 基本功能模式 ★ 只要求零漂标定完成。 */
+  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+#else
   const bool imu_ok =
       (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
+#endif
   const bool motors_ok = motors_online_ && gimbal_->feedbackHealthy();
   const bool all_ok = comm_ok && imu_ok && motors_ok && can_tx_guard_.healthy();
 
