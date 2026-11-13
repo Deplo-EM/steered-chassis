@@ -102,11 +102,11 @@ void InitMotors()
 
   for (int i = 0; i < 4; ++i) {
     OptionalParams opt;
-    opt.input_type = InputType::kCurr;  ///< 电流控制（现场 GM6020 走 0x1FE 电流帧）
+    opt.input_type = InputType::kRaw;  ///< 电压控制（说明书 2.3：默认 kRaw，电流需上位机开环）
     opt.angle_range = AngleRange::kNegPiToPosPi;  ///< 舵角用 [-π, π)
     opt.dir = kSteerDir[i];
     opt.angle_offset = kSteerAngleOffset[i];
-    opt.max_curr_input_lim = kSteerCurrentLimit;
+    opt.max_raw_input_lim = kSteerVoltageLimit;
     s_steers[i].init(kSteerId[i], opt);
   }
 

@@ -136,11 +136,9 @@ void robot::Chassis::update(float dt)
     voltage[i] = steer_pids_[i]->updateError(steer_err, dt);
     if (!std::isfinite(current[i]) || !std::isfinite(voltage[i])) { stop(); return; }
   }
-  /* PID 仍按 raw 电压整定；电流模式按 25000 raw ↔ 3 A 等比换算后再下发。 */
-  constexpr float kSteerRawToCurr = 3.0f / 25000.0f;
   for (int i = 0; i < kWheelNum; ++i) {
     wheels_[i]->setInput(current[i]);
-    steers_[i]->setInput(voltage[i] * kSteerRawToCurr);
+    steers_[i]->setInput(voltage[i]);
   }
 }
 
