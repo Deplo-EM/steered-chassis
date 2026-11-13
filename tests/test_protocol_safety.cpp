@@ -7,6 +7,7 @@
 #include "gimbal_chassis_comm.hpp"
 #include "crc8.hpp"
 #include "can_tx_guard.hpp"
+#include "can_tx_monitor.hpp"
 uint32_t protocol_now = 0;
 namespace hello_world::tick {
 uint64_t GetTickUs() { return uint64_t(protocol_now) * 1000u; }
@@ -59,6 +60,16 @@ int main() {
   guard.update(true, false, 105u); guard.update(true, true, 106u);
   guard.update(true, true, 205u); CHECK(!guard.healthy());
   guard.update(true, true, 206u); CHECK(guard.healthy()); CHECK(guard.canFeedWatchdog());
+
+  // 发送监督：超时必须同时报故障并释放槽位，否则三个邮箱会被永久占死。
+  robot::CanTxMonitor monitor;
+  monitor.submitted(0x01u, 1000u);
+  CHECK(!monitor.poll(0x01u, 0x00u, 1003u));
+  CHECK(monitor.tracked() == 0u);
+  // 正常完成：不报故障，槽位同样释放。
+  monitor.submitted(0x02u, 2000u);
+  CHECK(monitor.poll(0x00u, 0x02u, 2001u));
+  CHECK(monitor.tracked() == 0u);
   std::printf("Protocol safety: %d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
