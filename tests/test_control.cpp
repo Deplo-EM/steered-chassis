@@ -105,6 +105,18 @@ void TestAlignment() {
     CHECK(turning.wheel[i].command == 0);
     CHECK(turning.wp[i].integral() == 0);
   }
+
+  // 超时兜底：持续 300ms 仍对不齐时降级为逐轮放行，已对齐的轮子恢复驱动。
+  for (int t=0;t<400;++t) {
+    for (int i=0;i<4;++i) {
+      const float target=turning.chassis.wheelCommand(i).desired_angle;
+      turning.steer[i].feedback(i==2 ? target+0.7f : target);
+    }
+    turning.update(0,0,1);
+  }
+  CHECK(turning.chassis.alignTimedOut());
+  CHECK(turning.wheel[2].command == 0);
+  CHECK(turning.wheel[0].command != 0);
 }
 
 void TestUniformSaturation() {
