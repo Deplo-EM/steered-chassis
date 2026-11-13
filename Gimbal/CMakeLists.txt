@@ -23,6 +23,8 @@ set(CMAKE_C_EXTENSIONS ON)
 # tick.cpp 内部按宏选择实现，不定义这个宏的话 GetTickMs() 根本不会被编译出来，
 # 链接时会报 "undefined reference to GetTickMs"。
 add_compile_definitions(USE_HAL_TICK)
+# 基本功能模式：底盘不等云台、IMU 只需标定、CAN 失败不停机（测试不定义）。
+add_compile_definitions(ROBOT_BASIC_MODE=1)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 get_filename_component(CMAKE_CURRENT_SOURCE_PARENT_DIR

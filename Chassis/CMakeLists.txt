@@ -23,8 +23,14 @@ set(CMAKE_C_EXTENSIONS ON)
 # tick.cpp 内部按宏选择实现，不定义这个宏的话 GetTickMs() 根本不会被编译出来，
 # 链接时会报 "undefined reference to GetTickMs"。
 add_compile_definitions(USE_HAL_TICK)
+# 基本功能模式：底盘不等云台、IMU 只需标定、CAN 失败不停机（测试不定义）。
+add_compile_definitions(ROBOT_BASIC_MODE=1)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
+option(ROBOT_STEER_MODE_PROBE "Build a stand-only GM6020 diagnostic, separately from acceptance firmware" OFF)
+if(ROBOT_STEER_MODE_PROBE)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 get_filename_component(CMAKE_CURRENT_SOURCE_PARENT_DIR
                        ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
 
@@ -138,6 +144,12 @@ add_subdirectory(third_party)
 # Add an executable for the project
 file(GLOB startup_file "${CMAKE_CURRENT_SOURCE_DIR}/*.s")
 add_executable(${PROJECT_NAME} ${project_srcs} ${startup_file})
+set(firmware_name ${PROJECT_NAME})
+if(ROBOT_STEER_MODE_PROBE)
+  set(firmware_name steered_chassis_steer_probe)
+  set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME ${firmware_name})
+  target_compile_definitions(${PROJECT_NAME} PRIVATE ROBOT_STEER_MODE_PROBE=1)
+endif()
 message(STATUS "Project name: ${PROJECT_NAME}")
 
 # Add the project includes to the executable
@@ -148,8 +160,8 @@ target_link_libraries(${PROJECT_NAME} PUBLIC drivers)
 target_link_libraries(${PROJECT_NAME} PUBLIC cmsis_dsp)
 
 # Define the output hex and bin files
-set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
-set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)
+set(HEX_FILE ${PROJECT_BINARY_DIR}/${firmware_name}.hex)
+set(BIN_FILE ${PROJECT_BINARY_DIR}/${firmware_name}.bin)
 
 # Add a post-build command to generate the hex and bin files
 add_custom_command(

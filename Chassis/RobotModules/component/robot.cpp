@@ -289,10 +289,16 @@ bool robot::Robot::readEstopSwitch() const
 void robot::Robot::updateStateMachine()
 {
   const bool remote_ok = remote_input_.online;
+#if ROBOT_BASIC_MODE
+  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
+  const bool motors_ok = motors_online_ && chassis_->feedbackHealthy();
+  const bool peer_ok = true;
+#else
   const bool imu_ok =
       (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   const bool motors_ok = motors_online_ && chassis_->feedbackHealthy();
   const bool peer_ok = peer_online_ && peer_input_.working;
+#endif
   const bool all_ok = remote_ok && remote_armed_ && imu_ok && motors_ok && peer_ok && can_tx_guard_.healthy();
 
   const uint32_t now = hello_world::tick::GetTickMs();
@@ -462,6 +468,12 @@ void robot::Robot::updateGimbalCommand()
 
 void robot::Robot::applyOutput()
 {
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+  // 诊断版不运行常规三模式输出。只有通信层的独立单电机试探可下发。
+  chassis_->stop();
+  ramped_.reset();
+  return;
+#endif
   /* ★ 急停闸门：放在最外层 ★
    * 放在状态判断之前，是因为「恢复自检阶段舵角回中」也是一次真实动作——
    * 如果只在 Working 分支里判急停，按着急停上电时舵轮仍会自己转回中位。
@@ -503,6 +515,11 @@ void robot::Robot::updateCommData()
   d.dbus_online = remote_input_.online;
   d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
   d.gimbal_enable = d.working && !estop_;
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+  // 即使底盘解除本地急停开始短测，也持续通知云台保持停机。
+  d.estop = true;
+  d.gimbal_enable = false;
+#endif
   d.mode = mode_;
   d.yaw_rate = d.gimbal_enable ? gimbal_yaw_rate_ : 0.0f;
   d.pitch_target = gimbal_pitch_target_;
