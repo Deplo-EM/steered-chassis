@@ -113,19 +113,33 @@ void robot::Chassis::update(float dt)
 
   const float radius = solver_->geometry().wheel_radius;
   float drive_error[kWheelNum];
-  bool drive_ready = true;
+  bool all_aligned = true;
   for (int i = 0; i < kWheelNum; ++i) {
     drive_error[i] = robot::WrapPi(cmd[i].desired_angle - steer_now[i]);
     if (cmd[i].speed != 0.0f && std::fabs(drive_error[i]) > kSteerReadyAngle) {
-      drive_ready = false;
+      all_aligned = false;
     }
+  }
+  drive_ready_ = all_aligned;
+  if (all_aligned) {
+    align_pending_ms_ = 0.0f;
+    align_timeout_ = false;
+  } else {
+    align_pending_ms_ += dt * 1000.0f;
+    if (align_pending_ms_ >= kAlignTimeoutMs) align_timeout_ = true;
   }
 
   float current[kWheelNum], voltage[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
     const float steer_err = robot::WrapPi(cmd[i].angle - steer_now[i]);
-    if (!drive_ready) {
-      // 所有有驱动目标的轮组都到位才放行，避免单轮先滚而拖拽其余轮组。
+    /* 正常情况：所有有驱动目标的轮组都到位才统一放行，避免单轮先滚拖拽整车。
+     * 兜底：等待超过 kAlignTimeoutMs 仍对不齐（舵机卡住/零点错/等效解翻转），
+     *       降级为逐轮放行——已对齐的轮子先转，其余保持为零。
+     *       否则一个轮子永远对不齐，就会把四轮驱动永久锁死，整车不动。 */
+    const bool wheel_ok =
+        (cmd[i].speed == 0.0f) || (std::fabs(drive_error[i]) <= kSteerReadyAngle);
+    const bool release = all_aligned || (align_timeout_ && wheel_ok);
+    if (!release) {
       wheel_pids_[i]->reset();
       current[i] = 0.0f;
     } else {
@@ -156,6 +170,10 @@ void robot::Chassis::stop()
   }
   // 清历史，下一次 solve 从当时实测舵角开始，允许停机期间手动转动舵轮。
   if (solver_) solver_->reset();
+  // 停机后重新开始计时，避免恢复瞬间直接触发「超时降级」。
+  align_pending_ms_ = 0.0f;
+  align_timeout_ = false;
+  drive_ready_ = false;
 }
 
 /* Private function definitions ----------------------------------------------*/

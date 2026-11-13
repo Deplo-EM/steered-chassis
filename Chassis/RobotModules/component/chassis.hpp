@@ -79,6 +79,12 @@ class Chassis {
   /** 与遥控/对板在同一短临界区采集；纯模块调用时update会自行采集。 */
   void captureFeedback();
   bool feedbackHealthy() const { return feedback_healthy_; }
+  /** 全组对齐门当前是否已放行（诊断用） */
+  bool driveReady() const { return drive_ready_; }
+  /** 对齐门已等待的时长，ms（诊断用） */
+  float alignPendingMs() const { return align_pending_ms_; }
+  /** 是否已因等待超时降级为逐轮放行（诊断用） */
+  bool alignTimedOut() const { return align_timeout_; }
 
   /**
    * @brief 所有电机输出归零（急停 / 未就绪 / 掉线时调用）
@@ -96,6 +102,8 @@ class Chassis {
  private:
   /** 舵角误差超过这个值就不驱动轮子（rad） */
   static constexpr float kSteerReadyAngle = 0.35f;  // ≈20°
+  /** 全组等待上限：超过这个时长仍对不齐，就降级为逐轮放行（ms） */
+  static constexpr float kAlignTimeoutMs = 300.0f;
 
   hello_world::motor::Motor* wheels_[kWheelNum] = {nullptr};
   hello_world::motor::Motor* steers_[kWheelNum] = {nullptr};
@@ -109,6 +117,9 @@ class Chassis {
   bool ready_ = false;
   bool feedback_pending_ = false;
   bool feedback_healthy_ = false;
+  bool drive_ready_ = false;      ///< 最近一次全组对齐结果
+  bool align_timeout_ = false;    ///< 已超时降级（逐轮放行）
+  float align_pending_ms_ = 0.0f; ///< 对不齐已持续的时间
   float steer_feedback_[kWheelNum] = {};
   float wheel_velocity_[kWheelNum] = {};
 };

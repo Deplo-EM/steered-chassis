@@ -20,7 +20,12 @@ class CanTxMonitor {
       if(!(pending&(1u<<i))) {
         if(!(tx_ok&(1u<<i))) healthy=false;
         tracked_&=uint8_t(~(1u<<i));
-      } else if(now-since_[i]>=kDeadlineMs) healthy=false;
+      } else if(now-since_[i]>=kDeadlineMs) {
+        // 超时既报故障也释放槽位：否则该位永远保留，三个槽都被占死后
+        // CAN_Send_Msg 再也找不到可用邮箱，表现为「缓冲区在变、总线无帧」。
+        healthy=false;
+        tracked_&=uint8_t(~(1u<<i));
+      }
     }
     return healthy;
   }
