@@ -60,7 +60,11 @@ HW_KEEP_SYMBOL volatile bool g_fault_injection_enabled =
  * 刷机前后都可以用 strings 直接在 .elf 上核对，不用连板子。
  * ------------------------------------------------------------------------- */
 HW_KEEP_SYMBOL const char* const g_build_tag =
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+    "STEER-PROBE-BUILD";
+#else
     kEnableFaultInjection ? "FAULT-INJECTION-BUILD" : "SAFE-BUILD";
+#endif
 
 /** 构建标签的地址（启动时写入）。
  *  作用有两个：① 让上面的字符串真的被引用，不会被链接器回收；

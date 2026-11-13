@@ -109,6 +109,9 @@ class Robot {
 
   /** 当前（已做加速度限幅的）云台系速度指令 */
   const ChassisMotion& motion() const { return ramped_; }
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+  const RemoteInput& probeRemote() const { return remote_input_; }
+#endif
 
   /** 云台相对车头的偏航角 δ（来自 G2C 帧，单位 rad） */
   float delta() const;

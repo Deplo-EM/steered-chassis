@@ -51,6 +51,16 @@
 #include "robot.hpp"
 #include "tick.hpp"
 #include "usart.h"
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+#include "steer_mode_probe.hpp"
+
+namespace robot::probe {
+// Ozone 只读结果，急停后仍保留。每一组只显示该模式最近一次试探。
+volatile Result g_steer_probe_voltage;
+volatile Result g_steer_probe_current;
+volatile uint8_t g_steer_probe_phase = 0;
+}
+#endif
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -133,6 +143,44 @@ bool EncodeMotor(hello_world::motor::Motor* motor, uint8_t* frame)
 
 bool s_previous_output=false;
 bool s_cancel_pending=false;
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+static_assert(!robot::kEnableFaultInjection, "Do not combine the stand probe with fault injection");
+robot::probe::SteerModeProbe s_probe;
+bool s_probe_output = false;
+bool s_probe_cancel = false;
+
+/** 复制实时反馈；仅在全部正常且指定舵电机仍为 ID 2 时允许单轮试探。 */
+robot::probe::Command SteerProbeStep(robot::Robot* controller, bool can_ok, uint32_t now)
+{
+  robot::probe::Input input;
+  if (controller != nullptr && can_ok && !s_probe_cancel && controller->canTxHealthy() &&
+      controller->lifeState() == robot::LifeState::kWorking && RemoteAliveForWatchdog()) {
+    auto* motor = GetMotorSteer(1);
+    const auto& remote = controller->probeRemote();
+    if (motor != nullptr && motor->id() == 2u && motor->isHealthy()) {
+      robot::CriticalSection lock;
+      input.healthy = remote.online;
+      input.estop = controller->isEstopped();
+      input.left = remote.left;
+      input.right = remote.right;
+      input.forward = remote.lv;
+      input.other_neutral = remote.lh == 0 && remote.rh == 0 && remote.rv == 0 && remote.wheel == 0;
+      input.angle = motor->angle();
+      input.current = motor->curr();
+    }
+  }
+  auto command = s_probe.step(input, now);
+  robot::probe::g_steer_probe_phase = static_cast<uint8_t>(s_probe.phase);
+  for (const bool voltage : {true, false}) {
+    const auto& src = voltage ? s_probe.voltage_result : s_probe.current_result;
+    auto& dst = voltage ? robot::probe::g_steer_probe_voltage : robot::probe::g_steer_probe_current;
+    dst.peak_angle_rad = src.peak_angle_rad;
+    dst.peak_delta_a = src.peak_delta_a;
+    dst.completed = src.completed;
+  }
+  return command;
+}
+#endif
 /** 只在输出撤销沿撤销旧队列；取消失败保留请求，下周期继续重试。 */
 bool CancelOnStop(robot::Robot* controller)
 {
@@ -186,7 +234,19 @@ void CommTask(void)
   // 控制仍为1kHz；电机500Hz（两板各用本地时钟，不保证物理错相）、状态200Hz，避免共享总线过载。
   const uint32_t now = hello_world::tick::GetTickMs();
   const bool stop_edge = s_previous_output && (controller == nullptr || !controller->outputPermitted());
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+  const auto probe_command = SteerProbeStep(controller, cycle_ok, now);
+  const bool probe_stop = s_probe_output && probe_command.raw == 0u;
+  s_probe_output = probe_command.raw != 0u;
+  if (probe_stop) s_probe_cancel = true;
+  if (s_probe_cancel) {
+    s_probe_cancel = !CAN_AbortPendingTx(robot::wiring::Can(robot::wiring::kChassisSteer));
+    if (s_probe_cancel) cycle_ok = false;
+  }
+  const bool motor_due = (now % 2u) == 0u || stop_edge || probe_stop;
+#else
   const bool motor_due = (now % 2u) == 0u || stop_edge;
+#endif
   if(!CancelOnStop(controller)) cycle_ok=false;
   /* ---------- 故障注入：占满 CAN 发送邮箱 ----------
    * 连发 3 帧把 3 个邮箱占满，本周期真正的控制帧就会发送失败，
@@ -210,12 +270,14 @@ void CommTask(void)
     hello_world::motor::Motor* wheel0 = GetMotorWheel(0);
     if (wheel0 == nullptr) motor_cycle_ok = false;
     if (wheel0 != nullptr) {
+#if !defined(ROBOT_STEER_MODE_PROBE) || !ROBOT_STEER_MODE_PROBE
       for (int i = 0; i < 4; ++i) {
         hello_world::motor::Motor* motor = GetMotorWheel(i);
         if (motor != nullptr) {
           if (!EncodeMotor(motor, s_wheel_frame)) motor_cycle_ok = false;
         } else { motor_cycle_ok = false; }
       }
+#endif
       if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kChassisWheel), s_wheel_frame,
                         hello_world::motor::M3508::GetTxId(wheel0->id()), 8)) {
         ++s_can_tx_fail_count;
@@ -224,9 +286,29 @@ void CommTask(void)
     }
 
     /* ---------- 2. 下发转向电机（4 台共用 0x1FF 电压帧） ---------- */
+#if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
+    // 只发当前选择的协议。空闲时交替发两种零帧；脉冲结束当轮立刻发两种零帧。
+    const auto send_probe = [&](const robot::probe::Command& command) {
+      command.encode(s_steer_frame);
+      if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kChassisSteer),
+                        s_steer_frame, command.id, 8)) {
+        ++s_can_tx_fail_count;
+        motor_cycle_ok = false;
+      }
+    };
+    if (s_probe_output && motor_cycle_ok && cycle_ok) {
+      send_probe(probe_command);
+    } else if (probe_stop) {
+      send_probe({0x1FF, 0});
+      send_probe({0x1FE, 0});
+    } else {
+      send_probe({static_cast<uint16_t>((now & 2u) ? 0x1FF : 0x1FE), 0});
+    }
+#else
     for (uint8_t i = 0; i < 8; ++i) {
       s_steer_frame[i] = 0;
     }
+#endif
     hello_world::motor::Motor* steer0 = GetMotorSteer(0);
     if (steer0 == nullptr) motor_cycle_ok = false;
     if (steer0 != nullptr) {
