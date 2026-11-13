@@ -81,6 +81,30 @@ void TestAlignment() {
   r.update(0,1); CHECK(r.wheel[0].command>0);
   CHECK(Near(r.chassis.wheelCommand(0).angle,pi/2));
   r.update(1,0); CHECK(r.wheel[0].command==0);
+
+  current_case="rotation waits for every driven wheel to align";
+  Rig turning;
+  // 纯旋转时，左前轮已在切向，另外三个轮组仍指向车头。
+  turning.steer[0].feedback(3*pi/4);
+  turning.update(0,0,1);
+  CHECK(turning.chassis.wheelCommand(0).speed > 0);
+  CHECK(turning.steer[1].command != 0);
+  for (const auto& m:turning.wheel) CHECK(m.command == 0);
+
+  for (int i=0;i<4;++i) {
+    turning.steer[i].feedback(turning.chassis.wheelCommand(i).desired_angle);
+  }
+  turning.update(0,0,1);
+  for (const auto& m:turning.wheel) CHECK(m.command != 0);
+
+  // 任一受驱轮失去对齐时，整组撤销驱动并清旧积分，舵角环继续纠偏。
+  turning.steer[2].feedback(turning.chassis.wheelCommand(2).desired_angle+0.7f);
+  turning.update(0,0,1);
+  CHECK(turning.steer[2].command != 0);
+  for (int i=0;i<4;++i) {
+    CHECK(turning.wheel[i].command == 0);
+    CHECK(turning.wp[i].integral() == 0);
+  }
 }
 
 void TestUniformSaturation() {

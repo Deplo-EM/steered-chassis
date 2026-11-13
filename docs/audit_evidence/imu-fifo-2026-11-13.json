@@ -1,0 +1,23 @@
+{
+  "date": "2026-11-13",
+  "builds": {
+    "Chassis": {
+      "elf": "Chassis/build/steered_chassis.elf",
+      "elf_sha256": "194f5816e6c0f0ba2848b70a7253c3716b60bf55305454fa5a8ebee3487fc8f7",
+      "bin_sha256": "5dd1515b46b87099c1f03476c11d0154ab7936c745cfa1b771097a40264e9a6a",
+      "tag": "SAFE-BUILD",
+      "build_log": "Chassis/build/audit/imu-fifo-2026-11-13.log"
+    },
+    "Gimbal": {
+      "elf": "Gimbal/build/steered_gimbal.elf",
+      "elf_sha256": "b0c09a177f9acd168039b3095f5fdd3939b1ceca518197ab39ad988c4a52ea5f",
+      "bin_sha256": "f7387d9ae080dab4c8df6806833fc78ec1eceede7f3e56f1cccae16b1acf61b5",
+      "tag": "SAFE-BUILD",
+      "build_log": "Gimbal/build/audit/imu-fifo-2026-11-13.log"
+    }
+  },
+  "host_checks": 1335,
+  "host_failures": 0,
+  "host_log": "tests/build/imu-fifo-full-2026-11-13.log",
+  "new_firmware_on_robot_verified": false
+}

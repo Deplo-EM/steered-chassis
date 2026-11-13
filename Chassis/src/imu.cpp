@@ -25,6 +25,12 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
                                  const BMI088Config& config)
 {
   inited_ = false;
+  // 每个FIFO帧独立积分，步长由陀螺仪ODR决定，不是TIM6周期。
+  constexpr float kGyroOdrHz[] = {2000.0f, 2000.0f, 1000.0f, 400.0f,
+                                   200.0f, 100.0f, 200.0f, 100.0f};
+  const auto odr = static_cast<uint8_t>(config.gyro_odr_fbw);
+  if (odr >= sizeof(kGyroOdrHz) / sizeof(kGyroOdrHz[0])) return false;
+  gyro_sample_freq_ = kGyroOdrHz[odr];
   restartCalibration();
   bmi_.init(hw_config, rot_mat_flatten, config);
 
@@ -36,7 +42,6 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
     return false;
   }
 
-  ahrs_.init(kImuSampleFreq, kImuMahonyKp, kImuMahonyKi);
   restartCalibration();
   inited_ = true;
   return true;
@@ -54,7 +59,7 @@ void hello_world::imu::Imu::restartCalibration()
   gyro_sum_[0] = gyro_sum_[1] = gyro_sum_[2] = 0.0f;
   gyro_bias_[0] = gyro_bias_[1] = gyro_bias_[2] = 0.0f;
   euler_[0] = euler_[1] = euler_[2] = 0.0f;
-  ahrs_.init(kImuSampleFreq, kImuMahonyKp, kImuMahonyKi);
+  ahrs_.init(gyro_sample_freq_, kImuMahonyKp, kImuMahonyKi);
 }
 
 void hello_world::imu::Imu::update()
@@ -86,7 +91,13 @@ void hello_world::imu::Imu::update()
     if (advance>0) { last_clock_=info.sensor_time; last_clock_tick_=now; }
   }
   if (info.accel_ready) { accel_seen_=true; last_accel_tick_=now; }
-  if (info.gyro_ready) { gyro_seen_=true; last_gyro_tick_=now; }
+  if (info.gyro_discontinuity) {
+    // 样本队列失去连续性，旧姿态不再可信，重新标定后才能恢复出力。
+    restartCalibration();
+    RejectSample();
+    return;
+  }
+  if (info.gyro_count != 0u) { gyro_seen_=true; last_gyro_tick_=now; }
   if (!FreshnessOk(now)) {
     ++rej_fresh_;
     if ((now - last_clock_tick_) > kImuFreshnessMs) ++stale_clock_;
@@ -94,19 +105,22 @@ void hello_world::imu::Imu::update()
     if ((now - last_gyro_tick_) > kImuFreshnessMs) ++stale_gyro_;
     return;
   }
-  // 轮询相位导致暂时没有新陀螺样本时，保留有时限的上一有效状态，不重复积分/标定。
-  if (!info.gyro_ready) return;
+  if (info.gyro_count == 0u) return;  // 空队列不重复标定、积分或刷新有效样本。
 
-  /* ---------- 1.5 运行期健康检查（审计 M3 + F3） ----------
-   * 初始化成功不代表运行中一直正常。SPI 接触不良时读回来的可能是全 0、
-   * 全 0xFF、NaN，或者短暂的乱码。
-   *
-   * ★ 关键：坏样本**根本不进入**标定和 Mahony。如果先喂给滤波器再判"不健康"，
-   *   一次坏数据就会把姿态拉歪，恢复起来要好几百毫秒（甚至永久偏掉）。 */
-  if (!IsSampleOk(sample_acc, sample_gyro, sample_temperature)) {
-    ++rej_sample_; RejectSample(); return;
+  // 先校验整个批次，再按顺序消费；坏帧不能部分污染标定或姿态。
+  for (uint8_t i = 0; i < info.gyro_count; ++i) {
+    if (!IsSampleOk(sample_acc, info.gyro_batch[i], sample_temperature)) {
+      ++rej_sample_; RejectSample(); return;
+    }
   }
+  for (uint8_t i = 0; i < info.gyro_count; ++i) {
+    if (!ApplySample(sample_acc, info.gyro_batch[i], sample_temperature, now)) break;
+  }
+}
 
+bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float sample_gyro[3],
+                                      float sample_temperature, uint32_t now)
+{
   sample_valid_ = true;
   last_sample_tick_=now;
   for (int i = 0; i < 3; ++i) {
@@ -153,11 +167,11 @@ void hello_world::imu::Imu::update()
       calibrated_ = true;
       /* 标定完成这一刻就是姿态零点，Mahony 从单位四元数重新开始，
        * 加速度计会在随后几百毫秒内把 roll / pitch 收敛到正确值。 */
-      ahrs_.init(kImuSampleFreq, kImuMahonyKp, kImuMahonyKi);
+      ahrs_.init(gyro_sample_freq_, kImuMahonyKp, kImuMahonyKi);
     } else {
       /* 标定未完成：输出保持 0，绝不对外提供「看起来像真值」的角度 */
       gyro_bias_removed_[0] = gyro_bias_removed_[1] = gyro_bias_removed_[2] = 0.0f;
-      return;
+      return true;
     }
   }
 
@@ -174,10 +188,11 @@ void hello_world::imu::Imu::update()
     if (!std::isfinite(angle)) {
       ++bad_samples_total_;
       restartCalibration();  // 解算状态异常需重建，不能把坏姿态交给控制层。
-      return;
+      return false;
     }
   }
   for (int i = 0; i < 3; ++i) euler_[i] = candidate_euler[i];
+  return true;
 }
 
 /* Private function definitions ----------------------------------------------*/

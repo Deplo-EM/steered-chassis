@@ -183,7 +183,7 @@ void CommTask(void)
   bool cycle_ok=tx_first && tx_second;
   const bool failure_reported=controller && !cycle_ok;
   if(failure_reported) controller->notifyCanTxCycle(false); // 编码前先清零
-  // 控制仍为1kHz；电机500Hz错相、状态200Hz，避免共享总线过载。
+  // 控制仍为1kHz；电机500Hz（两板各用本地时钟，不保证物理错相）、状态200Hz，避免共享总线过载。
   const uint32_t now = hello_world::tick::GetTickMs();
   const bool stop_edge = s_previous_output && (controller == nullptr || !controller->outputPermitted());
   const bool motor_due = (now % 2u) == 0u || stop_edge;

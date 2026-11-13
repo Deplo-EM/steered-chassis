@@ -167,6 +167,7 @@ class Imu {
   /** 本周期采样是否可信（有限值、加速度/角速度量级正常） */
   bool IsSampleOk(const float acc[3], const float gyro[3], float temperature) const;
 
+  bool ApplySample(const float acc[3], const float gyro[3], float temperature, uint32_t now);
   void RejectSample();
   bool FreshnessOk(uint32_t now) const {
     return clock_seen_ && accel_seen_ && gyro_seen_ &&
@@ -208,6 +209,7 @@ class Imu {
   float gyro_bias_removed_[3] = {0.0f, 0.0f, 0.0f};
   float euler_[3] = {0.0f, 0.0f, 0.0f};
   float temperature_ = 0.0f;
+  float gyro_sample_freq_ = kImuSampleFreq;
 };
 
 }  // namespace imu

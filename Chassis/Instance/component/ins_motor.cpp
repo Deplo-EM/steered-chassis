@@ -72,8 +72,11 @@ constexpr Dir kSteerDir[4] = {kDirRev, kDirRev, kDirRev, kDirRev};
 /** 舵角零点偏移，单位 rad（说明书 6.2「舵向零点角度偏移」，固定值） */
 constexpr float kSteerAngleOffset[4] = {2.61346f, -2.06844f, 0.00729f, 1.58518f};
 
-/** 转向电压软件限幅（GM6020 满量程 ±25000，给 80%） */
+/** 转向电压软件限幅（GM6020 满量程 ±25000，给 80%）。仅电压模式下使用。 */
 constexpr float kSteerVoltageLimit = 20000.0f;
+
+/** 转向电流软件限幅（GM6020 电流模式 ±16384 ↔ ±3A，给 3A）。 */
+constexpr float kSteerCurrentLimit = 3.0f;
 
 /** 电机对象：函数内静态，第一次调用时构造（此时硬件时钟已初始化） */
 hello_world::motor::M3508 s_wheels[4];
@@ -99,11 +102,11 @@ void InitMotors()
 
   for (int i = 0; i < 4; ++i) {
     OptionalParams opt;
-    opt.input_type = InputType::kRaw;  ///< 电压控制（不需要上位机开电流环）
+    opt.input_type = InputType::kCurr;  ///< 电流控制（现场 GM6020 走 0x1FE 电流帧）
     opt.angle_range = AngleRange::kNegPiToPosPi;  ///< 舵角用 [-π, π)
     opt.dir = kSteerDir[i];
     opt.angle_offset = kSteerAngleOffset[i];
-    opt.max_raw_input_lim = kSteerVoltageLimit;
+    opt.max_curr_input_lim = kSteerCurrentLimit;
     s_steers[i].init(kSteerId[i], opt);
   }
 

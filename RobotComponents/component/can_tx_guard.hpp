@@ -40,10 +40,8 @@ class CanTxGuard {
     }
   }
 
-  bool healthy() const { return ROBOT_BASIC_MODE ? true : !faulted_; }
-  bool canFeedWatchdog() const {
-    return ROBOT_BASIC_MODE ? true : watchdog_allowed_;
-  }
+  bool healthy() const { return !faulted_; }
+  bool canFeedWatchdog() const { return watchdog_allowed_; }
   uint32_t failedCycles() const { return failed_cycles_; }
 
  private:
