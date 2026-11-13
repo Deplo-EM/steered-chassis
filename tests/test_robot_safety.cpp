@@ -8,6 +8,7 @@
 #include "ins_all.hpp"
 #include "comm_task.hpp"
 #include "pid.hpp"
+#include "board_wiring.hpp"
 #ifdef TEST_CHASSIS
 #include "chassis.hpp"
 #else
@@ -162,11 +163,11 @@ int main() {
   CommTask();
   ++now_ms;CommTask();
 #ifdef TEST_CHASSIS
-  CHECK(sent_bus[0x200]==&hcan2); // 原始接线图：轮电机在底盘CAN2
-  CHECK(sent_bus[0x1FF]==&hcan1); // 舵电机在底盘CAN1
-  CHECK(sent_bus[comm.tx_id()]==&hcan2); // 底盘CAN2连云台CAN1
+  CHECK(sent_bus[0x200]==robot::wiring::Can(robot::wiring::kChassisWheel));
+  CHECK(sent_bus[0x1FF]==robot::wiring::Can(robot::wiring::kChassisSteer));
+  CHECK(sent_bus[comm.tx_id()]==robot::wiring::Can(robot::wiring::kChassisPeer));
 #else
-  CHECK(sent_bus[1]==&hcan1); // yaw在共享的板间CAN，pitch在云台CAN2
+  CHECK(sent_bus[1]==robot::wiring::Can(robot::wiring::kGimbalYaw));
 #endif
   const int status_before=sent_count[comm.tx_id()];
 #ifdef TEST_CHASSIS

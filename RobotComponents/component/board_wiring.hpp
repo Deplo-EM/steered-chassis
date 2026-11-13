@@ -9,8 +9,8 @@
 #include "can.h"
 namespace robot::wiring {
 enum class CanPort { kCan1, kCan2 };
-constexpr CanPort kChassisWheel = CanPort::kCan2;
-constexpr CanPort kChassisSteer = CanPort::kCan1;
+constexpr CanPort kChassisWheel = CanPort::kCan1;
+constexpr CanPort kChassisSteer = CanPort::kCan2;
 constexpr CanPort kChassisPeer = CanPort::kCan2;
 constexpr CanPort kGimbalYaw = CanPort::kCan1;
 constexpr CanPort kGimbalPitch = CanPort::kCan2;
