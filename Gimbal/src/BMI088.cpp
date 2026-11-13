@@ -43,8 +43,18 @@ namespace imu
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
+static const uint8_t kMaxMultiTransLen = 8u;
 static const uint8_t kPaddingValue = 0x55;
-static uint8_t kPaddingData[BMI088SampleInfo::kMaxGyroSamples * 6u] = {};
+static uint8_t kPaddingData[kMaxMultiTransLen] = {
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+    kPaddingValue,
+};
 
 static const float kAccSens[4] = {
     3 * kGravAcc / 32768,
@@ -68,16 +78,13 @@ static const uint8_t kWriteSign = 0x00;
 static const uint8_t kReadSign = 0x80;
 
 static const uint8_t kGyroRawDataLen = 6u;
-// 保留FIFO_CONFIG_1默认bit3；stream模式，XYZ三轴。
-static constexpr uint8_t kGyroFifoStreamXyz = BMI088_GYRO_FIFO_CONFIG_1_STREAM | 0x08u;
 static const uint8_t kAccRawDataLen = 6u;
 static const uint8_t kTempRawDataLen = 2u;
 
 static const uint8_t kSpiTimeout = 2u;  ///* 单位：ms
 
 static const uint16_t kAccResetTimeMs = 2u;  ///* 加速度计重启耗时，单位：ms
-// Bosch §5.5.8：软复位最迟在30ms后覆盖配置，配置FIFO前必须等完。
-static constexpr uint32_t kGyroResetTimeMs = 30u;
+static const uint8_t kGyroResetTimeMs = 1u;  ///* 陀螺仪重启耗时，单位：ms
 static const uint16_t kCommWaitTimeUs = 2u;  ///* 通信间隔时间，单位：us
 /** 寄存器写入后读取间隔时间，单位：us */
 static const uint16_t kCheckWaitTimeUs = 120u;
@@ -273,6 +280,7 @@ bool BMI088::getData(float acc_data[3], float gyro_data[3], float* temp_ptr,
   BMI088SampleInfo sample_info;
   if (info != nullptr) {
     sample_info.accel_ready = (accRead(BMI088_ACC_ACC_STATUS) & BMI088_ACC_ACC_STATUS_ACC_DRDY) != 0;
+    sample_info.gyro_ready = (gyroRead(BMI088_GYRO_GYRO_INT_STAT_1) & BMI088_GYRO_GYRO_INT_STAT_1_GYRO_DRDY) != 0;
     uint8_t time[3] = {};
     accMultiRead(BMI088_ACC_SENSORTIME_0, 3, time);
     sample_info.sensor_time = uint32_t(time[0]) | (uint32_t(time[1])<<8) | (uint32_t(time[2])<<16);
@@ -282,37 +290,11 @@ bool BMI088::getData(float acc_data[3], float gyro_data[3], float* temp_ptr,
     tick::DelayUs(kCommWaitTimeUs); getAccData(tmp);
     arm_mat_vec_mult_f32(&rot_mat_, tmp, acc);
   }
-  // 先完成非破坏性读取。温度传输失败时保留FIFO，下一周期可补读。
-  if (temp_ptr != nullptr) { tick::DelayUs(kCommWaitTimeUs); temperature = getTemp(); }
-  if (!io_ok_) return false;
-  if (info != nullptr) {
-    // DRDY脉冲短于1ms；FIFO帧数是独立于控制循环相位的新样本证据。
-    tick::DelayUs(kCommWaitTimeUs);
-    const uint8_t status = gyroRead(BMI088_GYRO_FIFO_STATUS);
-    const uint8_t frames = status & 0x7Fu;
-    if ((status & BMI088_GYRO_FIFO_STATUS_FIFO_OVERRUN) || frames > BMI088SampleInfo::kMaxGyroSamples) {
-      // 不用积压样本冒充当前姿态；重写配置会清FIFO和overrun位。
-      tick::DelayUs(kCommWaitTimeUs);
-      gyroWrite(BMI088_GYRO_FIFO_CONFIG_1, kGyroFifoStreamXyz);
-      sample_info.gyro_discontinuity = true;
-    } else if (frames != 0u) {
-      uint8_t raw[BMI088SampleInfo::kMaxGyroSamples * kGyroRawDataLen] = {};
-      tick::DelayUs(kCommWaitTimeUs);
-      gyroMultiRead(BMI088_GYRO_FIFO_DATA, frames * kGyroRawDataLen, raw);
-      for (uint8_t frame = 0; frame < frames; ++frame) {
-        for (uint8_t axis = 0; axis < 3; ++axis) {
-          const auto* p = raw + frame*kGyroRawDataLen + axis*2;
-          tmp[axis] = kGyroSens[config_.gyro_range] * static_cast<int16_t>(p[0] | (p[1]<<8));
-        }
-        arm_mat_vec_mult_f32(&rot_mat_, tmp, sample_info.gyro_batch[frame]);
-      }
-      sample_info.gyro_count = frames;
-      memcpy(gyro, sample_info.gyro_batch[frames-1u], sizeof(gyro));
-    }
-  } else if (gyro_data != nullptr) {
+  if (gyro_data != nullptr) {
     tick::DelayUs(kCommWaitTimeUs); getGyroData(tmp);
     arm_mat_vec_mult_f32(&rot_mat_, tmp, gyro);
   }
+  if (temp_ptr != nullptr) { tick::DelayUs(kCommWaitTimeUs); temperature=getTemp(); }
   if (!io_ok_) return false;
   if (acc_data) memcpy(acc_data, acc, sizeof(acc));
   if (gyro_data) memcpy(gyro_data, gyro, sizeof(gyro));
@@ -387,18 +369,17 @@ BMI088ErrState BMI088::gyroInit(bool self_test) const
   /* 配置一些寄存器 */
   uint8_t gyro_bandwidth = config_.gyro_odr_fbw |
                            BMI088_GYRO_GYRO_BANDWIDTH_MUST_SET;
-  uint8_t gyro_init_config[][2] = {
+  uint8_t gyro_init_config[4][2] = {
       {BMI088_GYRO_GYRO_RANGE, config_.gyro_range},
       {BMI088_GYRO_GYRO_BANDWIDTH, gyro_bandwidth},
       {BMI088_GYRO_GYRO_LPM1, BMI088_GYRO_GYRO_LPM1_NORMAL},
-      {BMI088_GYRO_GYRO_INT_CTRL, BMI088_GYRO_GYRO_INT_CTRL_DRDY_IT_EN},
-      {BMI088_GYRO_FIFO_CONFIG_1, kGyroFifoStreamXyz}};
+      {BMI088_GYRO_GYRO_INT_CTRL, BMI088_GYRO_GYRO_INT_CTRL_DRDY_IT_EN}};
 
-  for (const auto& reg : gyro_init_config) {
+  for (uint8_t i = 0; i < 4; i++) {
     tick::DelayUs(kCommWaitTimeUs);
-    gyroWrite(reg[0], reg[1]);
+    gyroWrite(gyro_init_config[i][0], gyro_init_config[i][1]);
     tick::DelayUs(kCheckWaitTimeUs);
-    if (gyroRead(reg[0]) != reg[1]) {
+    if (gyroRead(gyro_init_config[i][0]) != gyro_init_config[i][1]) {
       return kBMI088ErrStateGyroConfigErr;
     }
   }

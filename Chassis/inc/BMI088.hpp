@@ -121,10 +121,7 @@ struct BMI088Config {  ///* BMI088 设备配置
 struct BMI088SampleInfo {
   uint32_t sensor_time = 0;  ///< 24位硬件时钟，39.0625us/计数
   bool accel_ready = false;
-  static constexpr uint8_t kMaxGyroSamples = 4;
-  uint8_t gyro_count = 0;
-  bool gyro_discontinuity = false;
-  float gyro_batch[kMaxGyroSamples][3] = {};
+  bool gyro_ready = false;
 };
 
 class BMI088 : public MemMgr

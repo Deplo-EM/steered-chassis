@@ -112,35 +112,25 @@ void robot::Chassis::update(float dt)
   if (!solver_->lastSolveValid()) { stop(); return; }
 
   const float radius = solver_->geometry().wheel_radius;
-  float drive_error[kWheelNum];
-  bool drive_ready = true;
-  for (int i = 0; i < kWheelNum; ++i) {
-    drive_error[i] = robot::WrapPi(cmd[i].desired_angle - steer_now[i]);
-    if (cmd[i].speed != 0.0f && std::fabs(drive_error[i]) > kSteerReadyAngle) {
-      drive_ready = false;
-    }
-  }
-
   float current[kWheelNum], voltage[kWheelNum];
   for (int i = 0; i < kWheelNum; ++i) {
     const float steer_err = robot::WrapPi(cmd[i].angle - steer_now[i]);
-    if (!drive_ready) {
-      // 所有有驱动目标的轮组都到位才放行，避免单轮先滚而拖拽其余轮组。
+    const float drive_err = robot::WrapPi(cmd[i].desired_angle - steer_now[i]);
+    if (std::fabs(drive_err) > kSteerReadyAngle) {
+      // 未到最终方向时直接撤销驱动力和旧积分；只把轮速目标设零仍会残留积分出力。
       wheel_pids_[i]->reset();
       current[i] = 0.0f;
     } else {
       // 目标沿实测滚动方向投影，减轻小角度未对齐时的轮胎侧向拖拽。
-      const float omega_target = cmd[i].speed / radius * std::cos(drive_error[i]);
+      const float omega_target = cmd[i].speed / radius * std::cos(drive_err);
       current[i] = wheel_pids_[i]->update(omega_target, wheel_velocity[i], dt);
     }
     voltage[i] = steer_pids_[i]->updateError(steer_err, dt);
     if (!std::isfinite(current[i]) || !std::isfinite(voltage[i])) { stop(); return; }
   }
-  /* PID 仍按 raw 电压整定；电流模式按 25000 raw ↔ 3 A 等比换算后再下发。 */
-  constexpr float kSteerRawToCurr = 3.0f / 25000.0f;
   for (int i = 0; i < kWheelNum; ++i) {
     wheels_[i]->setInput(current[i]);
-    steers_[i]->setInput(voltage[i] * kSteerRawToCurr);
+    steers_[i]->setInput(voltage[i]);
   }
 }
 
