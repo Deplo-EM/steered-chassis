@@ -6,10 +6,10 @@
 #define ROBOT_GIMBAL_LIMITS_HPP_
 
 namespace robot::gimbal_limits {
-/** 下限：机械止点约 −0.50 rad；−0.44 实车仍会顶到，改留 0.10 余量（约 5.7°）。
- *  若仍顶到，说明机械止点比 −0.50 更高，需要实测后重定。 */
+/** 下限：机械止点约 −0.50 rad；−0.40 实测已不顶，留 0.10 余量（约 5.7°）。 */
 inline constexpr float kPitchLowerRad = -0.40f;
-inline constexpr float kPitchUpperRad = 0.70f;
+/** 上限：原 +0.70 实车顶死，收到 +0.62，留 0.08 余量（约 4.6°）。 */
+inline constexpr float kPitchUpperRad = 0.62f;
 }  // namespace robot::gimbal_limits
 
 #endif  // ROBOT_GIMBAL_LIMITS_HPP_
