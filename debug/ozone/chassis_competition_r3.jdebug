@@ -1,0 +1,13 @@
+// R3 底盘。默认 Attach，只观察已经烧入同一 ELF 的板。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_ATTACH);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3/steered_chassis_competition_finish.elf");
+}

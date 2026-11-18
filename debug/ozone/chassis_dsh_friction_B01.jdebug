@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘舵向静摩擦前馈（台架特调 B01），四轮全开，电流版。
+// ELF: Chassis/build/dsh-friction-B01/steered_chassis_steer_current_field.elf
+// SHA-256: 3FBAD99A1502C24C363C6CBFD3D712AC1EBE64F435CD35A934386F3A5CD6BADF
+// 前馈：|误差|>0.06 rad 且 |舵速|<1 rad/s 时，叠加 0.25 A、方向随误差。
+// 注意：堵转检测（500 ms 不动）仍生效，台架长时间顶住会停机。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-friction-B01/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

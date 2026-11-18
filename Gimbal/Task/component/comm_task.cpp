@@ -30,6 +30,9 @@
  */
 /* Includes ------------------------------------------------------------------*/
 #include "comm_task.hpp"
+
+#include <cmath>
+
 #include "critical_section.hpp"
 
 #include "DT7.hpp"
@@ -57,6 +60,10 @@ namespace {
  *        看门狗不再起保护作用，**绝不能用于实车控制**，验收前必须改回来。
  */
 constexpr bool kDebugAlwaysFeedWatchdog = false;
+#if (defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK) || \
+    (defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH)
+static_assert(!kDebugAlwaysFeedWatchdog, "Keep watchdog supervision active");
+#endif
 
 /** 遥控数据超过这个时间没更新，就认为「主人失联」，不再喂狗（ms） */
 constexpr uint32_t kDbusTimeoutMs = 100u;
@@ -103,16 +110,20 @@ bool EncodeMotor(hello_world::motor::Motor* motor, uint8_t* frame)
 }
 
 /** 发一帧达妙电机控制报文（MIT 模式发送 ID = 电机 ID） */
-bool SendDamiaoFrame(CAN_HandleTypeDef* bus, hello_world::motor::Motor* motor, uint8_t* frame)
+bool SendDamiaoFrame(CAN_HandleTypeDef* bus, hello_world::motor::Motor* motor, uint8_t* frame,
+                     bool allowed, bool enable_requested)
 {
   if (motor == nullptr) {
     return false;
   }
-  for (uint8_t i = 0; i < 8; ++i) {
-    frame[i] = 0;
-  }
-  if (!EncodeMotor(motor, frame)) {
-    return false;
+  using hello_world::motor::DaMiao;
+  if (!allowed || enable_requested) {
+    // 失能必须是驱动命令，不能用「MIT 力矩填 0」代替。
+    for (uint8_t i = 0; i < 7; ++i) frame[i] = 0xFFu;
+    frame[7] = allowed ? DaMiao::kEnable : DaMiao::kDisable;
+  } else {
+    for (uint8_t i = 0; i < 8; ++i) frame[i] = 0;
+    if (!EncodeMotor(motor, frame)) return false;
   }
   return CAN_Send_Msg(bus, frame,
                       hello_world::motor::DM_J4310::GetTxId(motor->id()), 8);
@@ -137,18 +148,17 @@ bool RemoteAliveForWatchdog()
 }
 
 bool s_previous_output=false;
-bool s_cancel_pending=false;
-/** 只在输出撤销沿撤销旧队列；取消失败保留请求，下周期继续重试。 */
+bool s_can1_cancel_pending=false;
+bool s_can2_cancel_pending=false;
+/** 两路各自撤销旧队列；不能因一条总线失败而把另一条的新失能帧反复撤销。 */
 bool CancelOnStop(robot::Robot* controller)
 {
   const bool allowed=controller!=nullptr && controller->outputPermitted();
-  if(s_previous_output && !allowed) s_cancel_pending=true;
+  if(s_previous_output && !allowed) s_can1_cancel_pending=s_can2_cancel_pending=true;
   s_previous_output=allowed;
-  if(!s_cancel_pending) return true;
-  const bool first=CAN_AbortPendingTx(&hcan1);
-  const bool second=CAN_AbortPendingTx(&hcan2);
-  if(first && second) s_cancel_pending=false;
-  return first && second;
+  if(s_can1_cancel_pending) s_can1_cancel_pending=!CAN_AbortPendingTx(&hcan1);
+  if(s_can2_cancel_pending) s_can2_cancel_pending=!CAN_AbortPendingTx(&hcan2);
+  return !s_can1_cancel_pending && !s_can2_cancel_pending;
 }
 
 }  // namespace
@@ -197,12 +207,16 @@ void CommTask(void)
   static bool last_motor_submit_ok = true;
   if (motor_due) {
     bool motor_cycle_ok = true;
+    const bool motor_allowed = cycle_ok && controller != nullptr && controller->outputPermitted();
     /* ---------- 1. 两个达妙电机：各自一帧，ID 不同，不能合并 ---------- */
-    if (!SendDamiaoFrame(robot::wiring::Can(robot::wiring::kGimbalYaw), GetMotorYaw(), s_yaw_frame)) {
+    if (!SendDamiaoFrame(robot::wiring::Can(robot::wiring::kGimbalYaw), GetMotorYaw(), s_yaw_frame,
+                         motor_allowed, motor_allowed && controller->motorEnableRequested(0))) {
       ++s_can_tx_fail_count;
       motor_cycle_ok = false;
     }
-    if (!SendDamiaoFrame(robot::wiring::Can(robot::wiring::kGimbalPitch), GetMotorPitch(), s_pitch_frame)) {
+    const bool pitch_allowed = motor_allowed && motor_cycle_ok;
+    if (!SendDamiaoFrame(robot::wiring::Can(robot::wiring::kGimbalPitch), GetMotorPitch(), s_pitch_frame,
+                         pitch_allowed, pitch_allowed && controller->motorEnableRequested(1))) {
       ++s_can_tx_fail_count;
       motor_cycle_ok = false;
     }
@@ -214,22 +228,28 @@ void CommTask(void)
   /* ---------- 2. 双板通信帧（走 CAN1） ---------- */
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   if (comm == nullptr) cycle_ok = false;
-  static bool last_status_submit_ok = true;
-  static uint8_t previous_status = 0;
+  static bool retry_status = false;
+  static uint8_t last_queued_status = 0;
   const auto* state = comm != nullptr ? &comm->gimbal_data() : nullptr;
   const uint8_t status = state == nullptr ? 0u : uint8_t(state->working | (state->estop<<1) |
-      (state->dbus_online<<2) | (state->imu_ready<<3));
-  if (comm != nullptr && ((now % 5u) == 2u || status != previous_status)) {
+      (state->dbus_online<<2) | (state->ground_disarmed<<3));
+  // 急停、失联等状态变化须即时提交；例行状态错过一次仍由收端监督新鲜度。
+  const bool required = state != nullptr && (status != last_queued_status ||
+      !std::isfinite(state->yaw_joint) || !std::isfinite(state->pitch_joint));
+  const auto send_status = [&] {
     comm->encode(s_comm_frame);
-    if (!CAN_Send_Msg(robot::wiring::Can(robot::wiring::kGimbalPeer), s_comm_frame, comm->tx_id(), 8)) {
+    using robot::CanTxSubmitResult;
+    const auto result = CAN_TrySend(robot::wiring::Can(robot::wiring::kGimbalPeer),
+                                    s_comm_frame, comm->tx_id(), sizeof(s_comm_frame));
+    retry_status = result != CanTxSubmitResult::kQueued;
+    if (retry_status) {
       ++s_can_tx_fail_count;
-      last_status_submit_ok = false;
+      if (required || result != CanTxSubmitResult::kBusy) cycle_ok = false;
     } else {
-      last_status_submit_ok = true;
-      previous_status = status;
+      last_queued_status = status;
     }
-  }
-  cycle_ok = cycle_ok && last_status_submit_ok;
+  };
+  if (required) send_status();
 
   // 每周期最多转发一片，避免一次占满共享CAN的三个邮箱。
   uint8_t relay_frame[8]; uint32_t relay_id = 0; bool relay_pending = false;
@@ -245,6 +265,8 @@ void CommTask(void)
       ++s_can_tx_fail_count; cycle_ok = false;
     }
   }
+  // 按期状态是可重试的；与真实遥控分片同时到期时，让分片先占用剩余邮箱。
+  if (comm != nullptr && !required && ((now % 5u) == 2u || retry_status)) send_status();
 
   /* ---------- 3. 看门狗：整个周期都跑完了才喂 ----------
    * 全板**只有这一个**喂狗调用点。 */

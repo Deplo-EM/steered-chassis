@@ -1,0 +1,21 @@
+// Ozone 3.26+ project: 底盘 v19（抬平期间忽略 pitch 摇杆，到位后交还；其余同 v18）。
+// ELF: Chassis/build/dsh-ground-v19/steered_chassis_steer_current_field.elf
+// SHA-256: 554C95045490A6073F41DE04E77AD0F544D980B52964D16EFFF084012AE43CFC
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-ground-v19/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

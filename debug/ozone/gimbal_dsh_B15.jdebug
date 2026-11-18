@@ -1,0 +1,21 @@
+// Ozone 3.26+ project: 云台 B15（Yaw 2.6/0.05/0.40，Pitch 7.2/2.0/0.40，加硬）。
+// ELF: Gimbal/build/dsh-gimbal-B15/steered_gimbal.elf
+// SHA-256: 5CA3EF6EB62F9CB6A09B12A89C9802AA57B0DA1073B8475D1C5E46F02CF1C90E
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-gimbal-B15/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

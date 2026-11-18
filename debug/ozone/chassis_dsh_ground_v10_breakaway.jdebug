@@ -1,0 +1,21 @@
+// Ozone 3.26+ project: 地面版 v10（脉冲式静摩擦补偿：1.0 A / 60 ms，卡住 100 ms 后触发）。
+// ELF: Chassis/build/dsh-ground-v10-breakaway/steered_chassis_steer_current_field.elf
+// SHA-256: A514AC895A5B8603DB300FD23E677FAC80FCA53B381ED6A8156880205F3400CD
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-ground-v10-breakaway/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

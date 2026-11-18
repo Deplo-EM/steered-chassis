@@ -26,6 +26,7 @@ struct Command {
 struct Result {
   uint32_t completed = 0;
   float peak_angle_rad = 0, peak_delta_a = 0;
+  uint32_t attempted = 0, queued = 0, sent = 0, unconfirmed = 0;
 };
 
 class SteerModeProbe {
@@ -33,6 +34,8 @@ class SteerModeProbe {
   enum class Phase : uint8_t { kWaitStop, kHoldStop, kWaitNeutral, kReady, kPulse, kSpent };
   Result voltage_result, current_result;
   Phase phase = Phase::kWaitStop;
+
+  Result& resultFor(uint16_t id) { return id == 0x1FF ? voltage_result : current_result; }
 
   Command step(const Input& in, uint32_t now) {
     if (!in.healthy || !std::isfinite(in.angle) || !std::isfinite(in.current) ||
@@ -73,11 +76,12 @@ class SteerModeProbe {
       }
       return {};
     }
-    auto& result = id == 0x1FF ? voltage_result : current_result;
+    auto& result = resultFor(id);
     if (phase == Phase::kReady && in.forward >= 0.16f) {
       angle_start_ = in.angle;
       current_start_ = in.current;
       result.peak_angle_rad = result.peak_delta_a = 0.0f;
+      result.attempted = result.queued = result.sent = result.unconfirmed = 0;
       since_ = now;
       phase = Phase::kPulse;
     }

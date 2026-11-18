@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 首跑锁定底盘（Ground trial locked，遥控不产生舵/轮电流）。
+// ELF: Chassis/build/ground-trial-locked/steered_chassis_ground_locked.elf
+// SHA-256: 49AECC71A98DE5C01BD60D76FC6CF2DD4861739508562582090A8AFAFD15005A
+// 用途：核对通信、反馈与停机路径；不用于带动力运行。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/ground-trial-locked/steered_chassis_ground_locked.elf");
+
+  Watch.Add("g_ground_build_tag");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

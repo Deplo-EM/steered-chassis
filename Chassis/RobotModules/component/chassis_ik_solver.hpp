@@ -29,9 +29,8 @@
  *
  *  【为什么要有「等效解翻转」】
  *  舵角是周期的：θ 和 θ+π 只差「轮子反过来转」，对整车运动完全等价。
- *  如果目标舵角突然从 +170° 变到 -170°，直接跟过去要转 340°，舵机原地大甩；
- *  而换成「-170°+180°=+10°、轮速取反」只需要转 20°。所以当目标与当前相差
- *  超过 90° 时，必须选另一支解。
+ *  例如实测舵角为 0°、速度方向为 160°，转到 -20° 并反转轮速即可。
+ *  选哪支解以实测角为准；再用上一次目标限制目标角的变化率。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -50,8 +49,16 @@ namespace hello_world {
 namespace chassis_ik_solver {
 
 /* Exported constants --------------------------------------------------------*/
+/** 实测舵角在此误差内时，正常驱动不因对齐误差降速。 */
+inline constexpr float kDriveAlignedRad = 0.08f;
 
 /* Exported types ------------------------------------------------------------*/
+
+/** 单轮已测的舵角禁入区；半宽包括动态跟踪裕量，0 表示未配置。 */
+struct SteerKeepout {
+  float center_rad = 0.0f;
+  float half_width_rad = 0.0f;
+};
 
 /** 整车几何参数（单位：m）。
  *  @note 数值来自考核说明书（已补全版）6.2「底盘几何参数」，实车如有改动请同步。 */
@@ -67,6 +74,9 @@ struct Geometry {
   /** 轮组中心到车体中心的距离（左右方向，y 轴）。
    *  与 x 方向相同 → 四个轮组构成正方形。 */
   float half_width = 0.167f;
+
+  /** 左前、左后、右后、右前。角度用该物理轮位标定后的车体系舵角。 */
+  SteerKeepout steer_keepout[4] = {};
 };
 
 /** 单个轮组的解算结果 */
@@ -82,6 +92,7 @@ struct WheelCommand {
   float angle = 0.0f;
   /** 未限速的最终等效舵角(rad)，用于判断驱动轮实际方向是否对齐。 */
   float desired_angle = 0.0f;
+  bool reanchored = false;  ///< 本拍舍弃了已不适用的旧限速起点，需清除该轮的舵角 PID 历史。
 };
 
 /**
@@ -110,7 +121,7 @@ class ChassisIkSolver {
    * @param max_steer_rate  舵角目标变化率上限，单位 rad/s（防止舵机猛打）
    * @param max_wheel_speed 轮速上限，单位 m/s（防止超速）
    * @param steer_flip_margin 等效解翻转的「回差」，单位 rad。
-   *        例如取 0.05：只有超过 90°+2.9° 才翻转，避免在 90° 附近来回跳。
+   *        例如取 0.05：超过 90°+2.9° 切到反向，低于 90°−2.9° 切回正向。
    */
   void init(const Geometry& geo, float max_steer_rate = 10.0f,
             float max_wheel_speed = 3.0f, float steer_flip_margin = 0.05f);
@@ -126,11 +137,12 @@ class ChassisIkSolver {
    *                  传 nullptr 表示没有反馈（此时以历史目标为准）
    * @param dt        控制周期，单位 s
    * @param out       输出 4 个轮组的解
+   * @param keep_rotation 小陀螺模式先分配旋转所需轮速，剩余轮速给同方向平移。
    * @retval None
    */
   void solve(const robot::ChassisMotion& motion, float delta,
              const float steer_now[kWheelNum], float dt,
-             WheelCommand out[kWheelNum]);
+             WheelCommand out[kWheelNum], bool keep_rotation = false);
 
   /* 结果查询（solve 之后有效） */
   const WheelCommand& command(int index) const
@@ -139,6 +151,8 @@ class ChassisIkSolver {
   }
 
   bool lastSolveValid() const { return last_solve_valid_; }
+  /** 本拍无法找到安全舵角路径的轮位。索引与轮速、舵角数组相同。 */
+  uint8_t keepoutBlockedMask() const { return keepout_blocked_mask_; }
 
   const Geometry& geometry() const { return geo_; }
   const robot::ChassisMotion& chassis_motion() const { return chassis_motion_; }
@@ -148,18 +162,22 @@ class ChassisIkSolver {
   float wheelPosY(int index) const;
 
  private:
+  enum class SteerBranch : uint8_t { kUnselected, kDirect, kReversed };
+
   Geometry geo_;
   float max_steer_rate_ = 10.0f;
   float max_wheel_speed_ = 3.0f;
   float steer_flip_margin_ = 0.05f;
 
   WheelCommand command_[kWheelNum];
-  /** 上一次的舵角目标（连续角），用于速率限幅与等效解选择 */
+  /** 上一次的舵角目标（连续角），用于限制每周期的转角变化。 */
   float last_angle_[kWheelNum] = {0.0f, 0.0f, 0.0f, 0.0f};
+  SteerBranch branch_[kWheelNum] = {};  ///< 低速也保留选支；仅 reset() 清除。
   bool has_last_ = false;
   bool last_solve_valid_ = false;
+  uint8_t keepout_blocked_mask_ = 0u;
 
-  /** 最近一次使用的车体系速度（调试用） */
+  /** 限幅后分配给四轮的车体系速度（对齐与实车跟踪另行处理）。 */
   robot::ChassisMotion chassis_motion_;
 };
 

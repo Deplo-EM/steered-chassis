@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 地面版 v4 调试（行为同 v3，新增 delta/w/gyro 观测）。
+// ELF: Chassis/build/dsh-ground-v4-debug/steered_chassis_steer_current_field.elf
+// SHA-256: 966654AE002471D9B11604AD4648D19FEAE47B15AFDA1AF5530E24D3CB2B8CC8
+// 观测：mode、delta_rad、follow_w_cmd、follow_gyro_z、ramped_w 与四轮 steer_feedback。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-ground-v4-debug/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

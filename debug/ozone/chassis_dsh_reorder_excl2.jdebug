@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘电机 ID 重绑（LF=3,LB=4,RB=1,RF=2）+ 排除右后（索引 2），电流版。
+// ELF: Chassis/build/dsh-reorder-excl2/steered_chassis_steer_current_field.elf
+// SHA-256: 4F6D3F1B31F2DD4BDBAA346D8857F56A369115032AD911A696BE304A607B0642
+// 背景：实测 ID1=右后、ID2=右前、ID3=左前、ID4=左后（相对解算器旋转 180°）。
+// 右后=ID1，重绑后在解算器里是索引 2，故 ROBOT_EXCLUDED_WHEEL=2。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-reorder-excl2/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

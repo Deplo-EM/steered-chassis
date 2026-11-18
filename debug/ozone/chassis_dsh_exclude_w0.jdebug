@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 底盘排除索引 0（按实测映射为右后），电流版 + g_chassis_dbg。
+// ELF: Chassis/build/dsh-exclude-w0/steered_chassis_steer_current_field.elf
+// SHA-256: ACBEB71DBC51A9D42F5CF0F5C5698AB50AE01DD694425D1CB35BE7E9881ADF9A
+// 实测映射（两次失能试验）：0=右后，1=右前，2=左前，3=左后（相对代码假设旋转 180°）。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-exclude-w0/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

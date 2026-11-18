@@ -1,0 +1,34 @@
+// Ozone 3.26+ project: DSH PID baseline A01（Pitch Kp=3.6，含调试结构体）。
+// ELF: Gimbal/build/dsh-pid-A01/steered_gimbal.elf
+// SHA-256: 5F01D68B548DC6EF6A06C36792B1FDD8735DE6225AC57C4A59C73CFAB8311F78
+// 首选看 robot::diag::g_gimbal_dbg：一个符号装下全部量。
+// 只读观察用；不自动连接/下载/运行。烧录前隔离动力、右下急停、确认板号。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-pid-A01/steered_gimbal.elf");
+
+  // ---- 一个符号看全部（优先）----
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+
+  // ---- 兜底：扁平表达式 ----
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+  Watch.Add("s_gimbal.pitch_target_");
+  Watch.Add("s_gimbal.pitch_feedback_");
+  Watch.Add("s_pitch_pid.output_");
+  Watch.Add("s_pitch_pid.integral_");
+  Watch.Add("s_gimbal.yaw_target_");
+  Watch.Add("s_gimbal.yaw_world_feedback_");
+  Watch.Add("s_yaw_pid.output_");
+  Watch.Add("s_imu.euler_[2]");
+}

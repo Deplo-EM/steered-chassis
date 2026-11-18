@@ -61,11 +61,15 @@ int main() {
   guard.update(true, true, 205u); CHECK(!guard.healthy());
   guard.update(true, true, 206u); CHECK(guard.healthy()); CHECK(guard.canFeedWatchdog());
 
-  // 发送监督：超时必须同时报故障并释放槽位，否则三个邮箱会被永久占死。
+  // 超时仍跟踪旧槽，只有硬件确认撤销/清空才能结束跟踪。
   robot::CanTxMonitor monitor;
   monitor.submitted(0x01u, 1000u);
   CHECK(!monitor.poll(0x01u, 0x00u, 1003u));
-  CHECK(monitor.tracked() == 0u);
+  CHECK(monitor.tracked() == 1u);
+  monitor.beginCancel();
+  CHECK(monitor.cancelling());
+  monitor.confirmEmpty();
+  CHECK(monitor.tracked() == 0u && !monitor.cancelling());
   // 正常完成：不报故障，槽位同样释放。
   monitor.submitted(0x02u, 2000u);
   CHECK(monitor.poll(0x00u, 0x02u, 2001u));

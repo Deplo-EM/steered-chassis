@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘关闭舵角等效解翻转（快转不再跳 180°）+ 排除右后，电流版。
+// ELF: Chassis/build/dsh-noflip-excl2/steered_chassis_steer_current_field.elf
+// SHA-256: E95A22EB8AA26CCAB35A9E16FFF70B9AFE4CFB1123783217CF601AB65594FC17
+// 前提：ID 已按 LF=3/LB=4/RB=1/RF=2 重绑；右后=索引 2 已排除。
+// 取舍：方向反转时走长弧（最多 180°），快转会有滞后，但不再突然换支。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-noflip-excl2/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

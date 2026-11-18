@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 首跑运动底盘（Ground trial motion，与失能云台成对使用）。
+// ELF: Chassis/build/ground-trial-motion-review/steered_chassis_ground_motion.elf
+// SHA-256: 0F0A9971362927EC821358A7D59FE12AD86FFB58389DDD138A93089BCCB6FD0C
+// 用途：预备首跑；放行项完成前不进入实车流程。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/ground-trial-motion-review/steered_chassis_ground_motion.elf");
+
+  Watch.Add("g_ground_build_tag");
+  Watch.Add("s_robot");
+  Watch.Add("s_robot.ground_gate_.phase_");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("uwTick");
+}

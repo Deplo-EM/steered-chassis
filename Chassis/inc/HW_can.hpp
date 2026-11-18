@@ -59,6 +59,15 @@ bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
 
 #ifdef __cplusplus
 }
+
+#include "can_tx_receipt.hpp"
+/** 区分例行帧的邮箱暂满和真实故障；原有电机发送接口仍须检查返回值。 */
+robot::CanTxSubmitResult CAN_TrySend(CAN_HandleTypeDef* hcan, const uint8_t* msg,
+                                    uint32_t id, uint8_t len);
+
+/** 可选发送回执。回执须保留到不再 Pending；Sent 仅证明 CAN 硬件完成发送。 */
+bool CAN_SendTracked(CAN_HandleTypeDef* hcan, const uint8_t* msg, uint32_t id,
+                     uint8_t len, robot::CanTxReceipt& receipt);
 #endif
 
 #endif /* HW_COMPONENTS_BSP_COMM_HW_CAN_HPP_ */

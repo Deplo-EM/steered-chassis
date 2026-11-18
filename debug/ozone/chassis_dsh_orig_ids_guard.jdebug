@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 原始 ID {1,2,3,4} + 舵角越界判废已恢复（四轮驱动、无对齐门、无堵转）。
+// ELF: Chassis/build/dsh-orig-ids-guard/steered_chassis_steer_current_field.elf
+// SHA-256: DB2CF6736A17AACED8AB634BF6EA1154FD38E0DB672375112F5A44B6D95AB400
+// 判废触发时读 last_dead_.steer_angle.mask 与对应轮的原值。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-orig-ids-guard/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("last_dead_");
+  Watch.Add("uwTick");
+}

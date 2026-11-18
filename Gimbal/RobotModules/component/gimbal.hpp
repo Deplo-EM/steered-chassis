@@ -40,6 +40,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "module_state.hpp"
+#include "gimbal_limits.hpp"
 #include "pid.hpp"
 
 namespace hello_world {
@@ -61,10 +62,18 @@ namespace robot {
 class Gimbal {
  public:
   /* ---------------- 机械限位（实车按结构改） ---------------- */
-  /** pitch 下限，rad：约 −51°（枪口压到最低） */
-  static constexpr float kPitchLowerLimit = -0.9f;
-  /** pitch 上限，rad：约 +40°（枪口抬到最高） */
-  static constexpr float kPitchUpperLimit = 0.7f;
+  /** pitch 下限，rad。
+   *  2026-11-15 实车实测：目标压到 −0.9 时反馈停在 −0.5016 不动，
+   *  输出已顶到 −3.18（限幅 −3.5）、积分灌满 −1.50 —— 说明机械行程在约 −0.50。
+   *  故把软件下限收到 −0.47（留 0.03 余量），避免顶住机械限位后饱和+积分饱和。 */
+  static constexpr float kPitchLowerLimit = gimbal_limits::kPitchLowerRad;
+  /** pitch 上限，rad：约 +40°（枪口抬到最高）。尚未测到机械上止点，暂不改。 */
+  static constexpr float kPitchUpperLimit = gimbal_limits::kPitchUpperRad;
+
+  /** yaw 速率前馈增益，N·m / (rad/s)。
+   *  B13 0.20 已明显减小滞后；B14 提到 0.30（满杆约 2 rad/s → 0.6 N·m），
+   *  用前馈继续收拐角滞后，不再动 P（P 上限 2.2，2.5 会振荡）。 */
+  static constexpr float kYawRateFfGain = 0.30f;
 
   /* ---------------- 零点偏移（标定用） ---------------- */
   /** yaw 关节零位偏移：把云台与车头对齐时读到的角度填在这里，δ 就归零了 */
@@ -93,15 +102,22 @@ class Gimbal {
   /** 设定 pitch 的关节目标角（rad），内部会做软件限位钳位 */
   void setPitchTarget(float pitch_joint);
 
+  /** 设定 yaw 速率前馈（rad/s）：底盘下发的期望转速，用于减小跟随滞后。
+   *  符号约定与 PID 输出一致：正速率 → 正力矩（使世界角增大）。 */
+  void setYawRateFeedforward(float rate) { yaw_rate_ff_ = rate; }
+
   /**
    * @brief 周期更新：算误差 → PID → 力矩下发
    * @param dt             控制周期，s
    * @param yaw_world_meas 云台当前的世界系 yaw（来自云台 IMU），rad
+   * @param yaw_world_rate 世界系 yaw 角的变化率，rad/s
    */
-  void update(float dt, float yaw_world_meas);
+  void update(float dt, float yaw_world_meas, float yaw_world_rate);
   /** 在控制周期输入快照阶段调用，避免关节位置/健康来自不同反馈。 */
   void captureFeedback();
   bool feedbackHealthy() const { return feedback_healthy_; }
+  bool feedbackFinite() const { return feedback_finite_; }
+  bool controlValid() const { return control_valid_; }
 
   /** 两个电机输出归零（急停 / 未就绪） */
   /** 只清PID历史，恢复出力时保留本周期已经捕获的反馈。 */
@@ -122,19 +138,27 @@ class Gimbal {
   float pitchTarget() const { return pitch_target_; }
 
  private:
+  /** 把常用量写进 robot::diag::g_gimbal_dbg，供 Ozone 只读观察。 */
+  void updateDebug();
+
   hello_world::motor::Motor* yaw_motor_ = nullptr;
   hello_world::motor::Motor* pitch_motor_ = nullptr;
   hello_world::pid::Pid* yaw_pid_ = nullptr;
   hello_world::pid::Pid* pitch_pid_ = nullptr;
 
   float yaw_target_ = 0.0f;    ///< 世界系目标角
+  float yaw_rate_ff_ = 0.0f;   ///< yaw 速率前馈输入 rad/s
   float pitch_target_ = 0.0f;  ///< 关节目标角
   bool pitch_at_limit_ = false;
   bool ready_ = false;
   bool feedback_pending_ = false;
   bool feedback_valid_ = false;
   bool feedback_healthy_ = false;
+  bool feedback_finite_ = false;
+  bool control_valid_ = false;
   float yaw_feedback_ = 0, pitch_feedback_ = 0;
+  float pitch_joint_rate_ = 0.0f;  ///< 与俯仰关节角同方向，rad/s
+  float yaw_world_feedback_ = 0.0f;  ///< 世界系角反馈，供 Ozone 和目标角并排对照。
 };
 
 }  // namespace robot

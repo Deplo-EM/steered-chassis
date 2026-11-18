@@ -18,6 +18,17 @@
 #include "ins_chassis_iksolver.hpp"
 
 #include "chassis_ik_solver.hpp"
+
+namespace {
+
+// 逐轮填写隔离动力后核实的干涉区。顺序 LF/LB/RB/RF，单位 rad。
+// 每项为 {中心, 半宽（含实测裕量）}，半宽 0 表示没有启用该条路径约束。
+// 不清楚轮位或角度时保留 0，且不要据此判定这台车已能绕开刮擦。
+constexpr hello_world::chassis_ik_solver::Geometry kGeometry{
+    .steer_keepout = { {}, {}, {}, {} },
+};
+
+}  // namespace
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 /* Private types -------------------------------------------------------------*/
@@ -30,10 +41,13 @@ hello_world::chassis_ik_solver::ChassisIkSolver *GetChassisIkSolver() {
   static bool s_inited = false;
 
   if (!s_inited) {
-    hello_world::chassis_ik_solver::Geometry geo;
-    /* 舵角最大变化率 10 rad/s：从 0° 转到 90° 约 0.16s，
-     * 足够快又不会让舵机「啪」地一下甩过去。 */
-    s_solver.init(geo, 10.0f, 3.0f);
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+    // 只提高轨迹限速：90° 参考最短约 131 ms；实物速度还受负载、PID 和限流约束。
+    constexpr float kSteerRate = 12.0f;
+#else
+    constexpr float kSteerRate = 10.0f;
+#endif
+    s_solver.init(kGeometry, kSteerRate, 3.0f);
     s_inited = true;
   }
 

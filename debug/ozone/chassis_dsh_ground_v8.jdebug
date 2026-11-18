@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 地面版 v8（舵向静摩擦前馈 0.70 A；跟随 Kd=0.5 符号已翻正）。
+// ELF: Chassis/build/dsh-ground-v8/steered_chassis_steer_current_field.elf
+// SHA-256: DBC033F08E81E8A81A8EC14182BCAD0B778785120AD89F1B8B3062902BF5E271
+// 观测：g_chassis_dbg 的 steer_feedback[2]/steer_output[2] 看右后能否越过卡点。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-ground-v8/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: DSH PID B02（Pitch Kp=4.2 + 下极限 −0.47，含调试结构体）。
+// ELF: Gimbal/build/dsh-pid-B02/steered_gimbal.elf
+// SHA-256: 5DFB271AD9570F12CC62C2BD7C080166B8912B8F9BF47B261A98415A20B0B54C
+// 回退：B01（15FA04DD…）→ A01（5F01D68B…）
+// 首选看 robot::diag::g_gimbal_dbg：一个符号装下全部量。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-pid-B02/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

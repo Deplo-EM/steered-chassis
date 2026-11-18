@@ -5,34 +5,52 @@
 #ifndef ROBOT_CAN_TX_MONITOR_HPP_
 #define ROBOT_CAN_TX_MONITOR_HPP_
 #include <cstdint>
+#include "can_tx_receipt.hpp"
 namespace robot {
 class CanTxMonitor {
  public:
   static constexpr uint32_t kDeadlineMs=2u;
   uint8_t tracked() const { return tracked_; }
-  void submitted(uint8_t mask,uint32_t now) {
-    for(int i=0;i<3;++i) if(mask&(1u<<i)) since_[i]=now;
+  bool cancelling() const { return cancelling_; }
+  void beginCancel() {
+    cancelling_ = true;
+    for (int i = 0; i < 3; ++i) finish(i, CanTxStatus::kUnconfirmed);
+  }
+  void submitted(uint8_t mask,uint32_t now,CanTxReceipt* receipt=nullptr) {
+    for(int i=0;i<3;++i) if(mask&(1u<<i)) {
+      since_[i]=now;
+      receipts_[i]=receipt;
+    }
+    if (receipt) receipt->status = CanTxStatus::kPending;
     tracked_|=mask;
   }
   bool poll(uint8_t pending,uint8_t tx_ok,uint32_t now) {
     bool healthy=true;
     for(int i=0;i<3;++i) if(tracked_&(1u<<i)) {
       if(!(pending&(1u<<i))) {
-        if(!(tx_ok&(1u<<i))) healthy=false;
+        const bool sent = (tx_ok & (1u << i)) != 0;
+        if (!sent) healthy=false;
+        finish(i, sent ? CanTxStatus::kSent : CanTxStatus::kUnconfirmed);
         tracked_&=uint8_t(~(1u<<i));
       } else if(now-since_[i]>=kDeadlineMs) {
-        // 超时既报故障也释放槽位：否则该位永远保留，三个槽都被占死后
-        // CAN_Send_Msg 再也找不到可用邮箱，表现为「缓冲区在变、总线无帧」。
+        // 超时只报告故障。邮箱可能仍在发，须等控制器确认撤销。
         healthy=false;
-        tracked_&=uint8_t(~(1u<<i));
       }
     }
     return healthy;
   }
-  void reset() { tracked_=0; }
+  void confirmEmpty() { tracked_=0; cancelling_=false; }
  private:
+  void finish(int i, CanTxStatus result) {
+    if (receipts_[i] != nullptr) {
+      receipts_[i]->status = result;
+      receipts_[i] = nullptr;
+    }
+  }
+  bool cancelling_=false;
   uint8_t tracked_=0;
   uint32_t since_[3]={};
+  CanTxReceipt* receipts_[3]={};
 };
 }
 #endif

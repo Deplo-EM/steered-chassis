@@ -22,6 +22,7 @@
 #include "robot.hpp"
 
 #include <cmath>
+#include <limits>
 
 #include "DT7.hpp"
 #include "fault_injection.hpp"
@@ -31,6 +32,7 @@
 #include "tick.hpp"
 #include "critical_section.hpp"
 #include "basic_mode.hpp"
+#include "gimbal_debug.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -45,6 +47,23 @@ constexpr uint32_t kRemoteOfflineMs = 100;
 constexpr uint32_t kMotorOfflineMs = 100;
 /** 恢复自检时长，ms */
 constexpr uint32_t kResurrectionMs = 500;
+
+#if !defined(ROBOT_GROUND_GIMBAL_LOCK) || !ROBOT_GROUND_GIMBAL_LOCK
+float WorldYawRate(const hello_world::imu::Imu& imu)
+{
+  const float roll = imu.roll(), pitch = imu.pitch();
+  const float gyro_y = imu.gyroY(), gyro_z = imu.gyroZ();
+  if (!std::isfinite(roll) || !std::isfinite(pitch) ||
+      !std::isfinite(gyro_y) || !std::isfinite(gyro_z)) {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
+  // ZYX 欧拉角的 yaw 变化率。身体系 gyroZ 在云台有俯仰时不等于 yaw 变化率。
+  // 远离欧拉角奇异点时直接换算；接近竖直时限制分母增益，以免放大噪声。
+  const float denominator = std::fmax(0.35f, std::cos(pitch));
+  const float rate = (gyro_y * std::sin(roll) + gyro_z * std::cos(roll)) / denominator;
+  return robot::Clamp(rate, -15.0f, 15.0f);
+}
+#endif
 
 }  // namespace
 
@@ -63,8 +82,15 @@ void robot::Robot::init()
   state_enter_tick_ = hello_world::tick::GetTickMs();
   estop_ = false;
   can_tx_guard_ = CanTxGuard{};
+  imu_control_state_ = ImuControlState::kUnavailable;
+  diag::g_gimbal_dbg.dead_reason = 0u;
+  diag::g_gimbal_dbg.last_dead_reason = 0u;
+  diag::g_gimbal_dbg.last_dead_tick_ms = 0u;
   yaw_target_world_ = 0.0f;
   output_enabled_prev_ = false;
+  drive_feedback_ = {};
+  drive_permitted_ = estop_ack_seen_ = disabled_feedback_seen_ = false;
+  arm_started_tick_ = 0;
   initialized_ = (rc_ != nullptr) && (imu_ != nullptr) && (gimbal_ != nullptr) &&
                  (comm_ != nullptr);
 }
@@ -89,6 +115,17 @@ void robot::Robot::update()
   /* 4. 生成并下发指令 */
   applyOutput(kDt);
 
+  /* 4.5 调试快照：状态/授权（运动量由 Gimbal::update 填） */
+  {
+    auto& d = diag::g_gimbal_dbg;
+    d.state = static_cast<uint8_t>(state_);
+    d.estop = estop_ ? 1u : 0u;
+    d.authorized = output_enabled_prev_ ? 1u : 0u;
+    d.stick_rh = remote_input_.rh;
+    d.yaw_rate_cmd = output_enabled_prev_ && imu_control_state_ == ImuControlState::kFresh ?
+        peer_input_.yaw_rate : 0.0f;
+  }
+
   /* 5. 回填通信帧 */
   updateCommData();
 }
@@ -101,12 +138,12 @@ void robot::Robot::notifyRemoteRx()
 void robot::Robot::notifyCanTxCycle(bool success)
 {
   if (!initialized_) return;
-  const bool reset_ack = peer_online_ && peer_input_.dbus_online && peer_input_.estop;
+  const bool reset_ack = operatorEstopConfirmed();
   can_tx_guard_.update(success, reset_ack, hello_world::tick::GetTickMs());
   if (!can_tx_guard_.healthy()) {
+    diag::g_gimbal_dbg.dead_reason = static_cast<uint8_t>(diag::g_gimbal_dbg.dead_reason | 32u);
     enterState(LifeState::kDead);
-    gimbal_->stop();
-    output_enabled_prev_ = false;
+    stopOutputs();
     updateCommData();
   }
 }
@@ -146,6 +183,7 @@ void robot::Robot::updateInput()
     peer_online_ = !comm_->isOffline();
     motors_online_ = areAllMotorsOnline();
     gimbal_->captureFeedback();
+    drive_feedback_ = GetGimbalDriveFeedback();
   }
   remote_input_.normalize();
   /* 本地急停：只有「本板确实有遥控器且在线」时才采信它的拨杆，
@@ -164,16 +202,29 @@ void robot::Robot::updateInput()
 void robot::Robot::updateStateMachine()
 {
   const bool comm_ok = peer_online_;
-#if ROBOT_BASIC_MODE
-  const bool imu_ok = (imu_ != nullptr) && imu_->isCalibrated();
-#else
-  const bool imu_ok =
-      (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
-#endif
-  const bool motors_ok = motors_online_ && gimbal_->feedbackHealthy();
-  const bool all_ok = comm_ok && imu_ok && motors_ok && can_tx_guard_.healthy();
-
   const uint32_t now = hello_world::tick::GetTickMs();
+  const bool allow_imu_hold = state_ == LifeState::kWorking && !estop_ && output_enabled_prev_;
+  imu_control_state_ = EvaluateImuForControl(imu_, now, allow_imu_hold);
+  const bool imu_ok = imu_control_state_ != ImuControlState::kUnavailable;
+  // 正常失能仍有反馈，允许双板自检。已经在出力时意外失能必须撤销授权。
+  const bool motors_ok = motors_online_ && drive_feedback_.fault_free && gimbal_->feedbackFinite();
+  const bool lost_enable = output_enabled_prev_ && !estop_ && !gimbal_->feedbackHealthy();
+  const bool arm_timeout = drive_permitted_ && !output_enabled_prev_ && !estop_ &&
+                           !gimbal_->feedbackHealthy() && now - arm_started_tick_ >= kMotorOfflineMs;
+  const bool all_ok = comm_ok && imu_ok && motors_ok && !lost_enable && !arm_timeout &&
+                      can_tx_guard_.healthy();
+
+  /* 记录 all_ok 的失败位，便于实车一次复现就定位 Dead 原因。 */
+  {
+    uint8_t reason = 0;
+    if (!comm_ok) reason |= 1u;
+    if (!imu_ok) reason |= 2u;
+    if (!motors_ok) reason |= 4u;
+    if (lost_enable) reason |= 8u;
+    if (arm_timeout) reason |= 16u;
+    if (!can_tx_guard_.healthy()) reason |= 32u;
+    diag::g_gimbal_dbg.dead_reason = reason;
+  }
 
   switch (state_) {
     case LifeState::kDead:
@@ -213,31 +264,58 @@ void robot::Robot::enterState(LifeState next)
   /* 离开 Working 就停机；进入 Working 时的目标对齐在 applyOutput 的
    * 使能上升沿里完成（因为那时才知道「从这一刻开始真的允许出力」）。 */
   if (next != LifeState::kWorking) {
-    gimbal_->stop();
-    output_enabled_prev_ = false;
+    if (next == LifeState::kDead) {
+      estop_ack_seen_ = false;
+      diag::g_gimbal_dbg.last_dead_reason = diag::g_gimbal_dbg.dead_reason;
+      diag::g_gimbal_dbg.last_dead_tick_ms = state_enter_tick_;
+    }
+    stopOutputs();
   }
+}
+
+bool robot::Robot::operatorEstopConfirmed() const
+{
+  return (remote_input_.online && remote_input_.right == hello_world::remote_control::kSwitchStateDown) ||
+         (peer_online_ && peer_input_.alive && peer_input_.dbus_online && peer_input_.estop);
+}
+
+void robot::Robot::stopOutputs()
+{
+  if (drive_permitted_) disabled_feedback_seen_ = false;
+  drive_permitted_ = output_enabled_prev_ = false;
+  diag::g_gimbal_dbg.authorized = 0u;
+  diag::g_gimbal_dbg.yaw_rate_cmd = 0.0f;
+  gimbal_->stop();
 }
 
 void robot::Robot::applyOutput(float dt)
 {
-  if (state_ != LifeState::kWorking) {
-    gimbal_->stop();
-    output_enabled_prev_ = false;
-    return;
-  }
-
-  /* 急停闸门（最外层） */
-  if (estop_) {
-    gimbal_->stop();
-    output_enabled_prev_ = false;
-    return;
-  }
-
-  /* 接收端独立核对授权条件，不能只信任对板的一个 enable 位。 */
+#if defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK
+  (void)dt;
+  stopOutputs();  // 通信层始终发两轴失能；保持 DBUS 转发与反馈接收。
+#else
   const auto& command = peer_input_;
-  const bool enabled = command.alive && command.working && command.dbus_online &&
-                       command.imu_ready && command.gimbal_enable && !command.estop;
-  if (!enabled) {
+  const bool confirmed_estop = operatorEstopConfirmed();
+  if (confirmed_estop) estop_ack_seen_ = true;
+  // 世界系闭环用本板 IMU，自检已在状态机完成。对板 IMU 仅作遥测；
+  // 真正的对板授权取 gimbal_enable，不能用 imu_ready 再否决一次。
+  const bool allowed = state_ == LifeState::kWorking && !estop_ && estop_ack_seen_ && peer_online_ &&
+                       command.alive && command.working && command.dbus_online &&
+                       command.gimbal_enable && !command.estop;
+  const bool both_disabled = motors_online_ && drive_feedback_.fault_free &&
+      drive_feedback_.disabled_mask == GimbalDriveFeedback::kBothDisabled;
+  if (!allowed || (!drive_permitted_ && (!disabled_feedback_seen_ || !both_disabled))) {
+    if (!allowed && drive_permitted_ && !confirmed_estop) estop_ack_seen_ = false;
+    stopOutputs();
+    // 停机时双轴失能曾被确认还不够；最新反馈改变即作废，继续发失能而不发使能。
+    disabled_feedback_seen_ = both_disabled;
+    return;
+  }
+
+  if (!drive_permitted_) arm_started_tick_ = hello_world::tick::GetTickMs();
+  drive_permitted_ = true;
+  /* 允许通信任务尝试使能；两轴尚未确认使能时，闭环仍不运行。 */
+  if (!gimbal_->feedbackHealthy()) {
     gimbal_->stop();
     output_enabled_prev_ = false;
     return;
@@ -255,16 +333,27 @@ void robot::Robot::applyOutput(float dt)
    * 底盘板下发的是「转多快」（rad/s），这里积分成世界系目标角。
    * 为什么不直接让它下发角度：世界角只有持有 IMU 的本板才能定义，
    * 详见 gimbal_chassis_comm.hpp 的说明。 */
-  const float yaw_rate = command.yaw_rate;
+  // 短暂保留上一份姿态期间，冻结 Yaw 目标并去掉速率前馈，不在旧角度上继续积累运动。
+  const float yaw_rate =
+      imu_control_state_ == ImuControlState::kFresh ? command.yaw_rate : 0.0f;
   // 目标与反馈都是周期角；每周期归一化，避免长时间连续自旋丢失 float 小增量。
   yaw_target_world_ = robot::WrapPi(yaw_target_world_ + yaw_rate * dt);
   gimbal_->setYawWorldTarget(yaw_target_world_);
 
-  /* ---------- pitch：直接采用底盘下发的关节角目标（模块内部再限位） ---------- */
-  gimbal_->setPitchTarget(command.pitch_target);
+  /* ---------- pitch：底盘下发的关节角目标，减去车体俯仰做世界水平补偿 ----------
+   * 直行加减速时悬挂让车体俯仰，若只控关节角，炮管会跟着后仰/前倾。
+   * IMU 装在云台底座，其 pitch 就是车体俯仰；关节目标减去它即可保持水平。
+   * 若实车方向相反（越补越仰），把这里的减号翻成加号。 */
+  gimbal_->setPitchTarget(command.pitch_target - imu_->pitch());
 
   /* ---------- 闭环 ---------- */
-  gimbal_->update(dt, imu_->yaw());
+  gimbal_->setYawRateFeedforward(yaw_rate);
+  gimbal_->update(dt, imu_->yaw(), WorldYawRate(*imu_));
+  if (!gimbal_->controlValid()) {
+    diag::g_gimbal_dbg.dead_reason = 64u;  // 状态前置条件通过；本拍执行控制失败。
+    enterState(LifeState::kDead);
+  }
+#endif
 }
 
 void robot::Robot::updateCommData()
@@ -278,8 +367,12 @@ void robot::Robot::updateCommData()
   d.estop = remote_input_.online &&
             remote_input_.right == hello_world::remote_control::kSwitchStateDown;
   d.dbus_online = remote_input_.online;
-  d.imu_ready = (imu_ != nullptr) && imu_->isCalibrated() && imu_->isHealthy() && imu_->isSampleValid();
+  d.imu_ready = imu_control_state_ != ImuControlState::kUnavailable;
   d.pitch_at_limit = gimbal_->pitchAtLimit();
+#if defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK
+  d.ground_disarmed = d.working && motors_online_ && drive_feedback_.fault_free &&
+      drive_feedback_.disabled_mask == GimbalDriveFeedback::kBothDisabled;
+#endif
   d.yaw_joint = gimbal_->yawJoint();
   d.pitch_joint = gimbal_->pitchJoint();
 }

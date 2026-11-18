@@ -9,8 +9,7 @@
  * @attention :
  *  1. 本文件只依赖 <cmath>，不依赖任何硬件，底盘板 / 云台板共用，
  *     也可以在电脑上单独跑单元测试（tests/ 目录）。
- *  2. 微分项作用在「误差」上，并做了一阶低通滤波（否则 1ms 周期下反馈的
- *     量化噪声会被放大成剧烈抖动）。
+ *  2. 微分可对误差做差分，也可直接使用实测速度作为阻尼；两者共用一阶低通。
  *  3. 积分项带限幅 + 抗饱和：输出已经顶到上限、误差还在往同方向推时，
  *     不再继续累加积分，避免「积分灌死」后松杆还要等很久才退出来。
  *******************************************************************************
@@ -72,7 +71,7 @@ class Pid {
   }
 
   /** 清空积分与微分历史，首帧跳过差分以免产生微分尖峰。
-   *  @param measure 仅为调用兼容保留，不参与计算；微分使用误差历史。 */
+   *  @param measure 仅为调用兼容保留，不参与计算。 */
   void reset(float measure = 0.0f)
   {
     integral_ = 0.0f;
@@ -102,19 +101,40 @@ class Pid {
    */
   float updateError(float error, float dt)
   {
+    return updateImpl(error, dt, false, 0.0f, 0.0f, out_lim_);
+  }
+
+  /** P/I 用位置误差，D 用负的实测速度。两者必须处在同一坐标系，单位为每秒。 */
+  float updateWithMeasuredRate(float error, float measured_rate, float dt)
+  {
+    return updateImpl(error, dt, true, measured_rate, 0.0f, out_lim_);
+  }
+
+  /** 前馈与反馈在同一限幅内合成。积分抗饱和也使用合成后的输出。 */
+  float updateWithFeedforward(float error, float measured_rate, float dt,
+                              float feedforward, float actuator_limit)
+  {
+    return updateImpl(error, dt, true, measured_rate, feedforward, actuator_limit);
+  }
+
+ private:
+  float updateImpl(float error, float dt, bool use_measured_rate, float measured_rate,
+                   float feedforward, float actuator_limit)
+  {
     if (!std::isfinite(error) || !std::isfinite(dt) || dt <= 0.0f ||
+        !std::isfinite(measured_rate) ||
+        !std::isfinite(feedforward) || !std::isfinite(actuator_limit) || actuator_limit < 0.0f ||
         !std::isfinite(kp_) || !std::isfinite(ki_) || !std::isfinite(kd_) ||
         !std::isfinite(out_lim_) || !std::isfinite(i_lim_)) {
       reset();
       return 0.0f;
     }
+    const float limit = out_lim_ < actuator_limit ? out_lim_ : actuator_limit;
 
-    /* ---- 微分项：对误差差分，再做一阶低通 ----
-     * 低通系数 d_lpf_ 越小越平滑、但相位滞后越大。
-     * 1ms 周期、舵机角度环这种噪声水平，取 0.1~0.2 比较合适。 */
+    /* 低通系数越小越平滑，但相位滞后越大。复位后首帧仍只算 P/I。 */
     float d_raw = 0.0f;
     if (!first_run_) {
-      d_raw = (error - last_error_) / dt;
+      d_raw = use_measured_rate ? -measured_rate : (error - last_error_) / dt;
     }
     d_filtered_ += d_lpf_ * (d_raw - d_filtered_);
 
@@ -127,16 +147,16 @@ class Pid {
       integral_ = -i_lim_;
     }
 
-    float out = kp_ * error + ki_ * integral_ + kd_ * d_filtered_;
+    float out = kp_ * error + ki_ * integral_ + kd_ * d_filtered_ + feedforward;
 
     /* ---- 抗饱和（条件积分）：输出已饱和且误差仍在把输出往饱和方向推时，
      *      撤销本次积分，防止「越顶越积」。 ---- */
     const float integral_push = ki_ * (integral_ - previous_integral);
-    if ((out > out_lim_ && integral_push > 0.0f) ||
-        (out < -out_lim_ && integral_push < 0.0f)) {
+    if ((out > limit && integral_push > 0.0f) ||
+        (out < -limit && integral_push < 0.0f)) {
       // 限幅后的积分不能减回 error*dt；直接恢复保存值，避免越过积分下限。
       integral_ = previous_integral;
-      out = kp_ * error + ki_ * integral_ + kd_ * d_filtered_;
+      out = kp_ * error + ki_ * integral_ + kd_ * d_filtered_ + feedforward;
     }
 
     if (!std::isfinite(out) || !std::isfinite(integral_) || !std::isfinite(d_filtered_)) {
@@ -145,10 +165,10 @@ class Pid {
     }
 
     /* ---- 输出限幅 ---- */
-    if (out > out_lim_) {
-      out = out_lim_;
-    } else if (out < -out_lim_) {
-      out = -out_lim_;
+    if (out > limit) {
+      out = limit;
+    } else if (out < -limit) {
+      out = -limit;
     }
 
     last_error_ = error;
@@ -157,6 +177,7 @@ class Pid {
     return out;
   }
 
+ public:
   /* 参数修改（在线整定时可以临时改，不必 reset） */
   void setGains(float kp, float ki, float kd)
   {

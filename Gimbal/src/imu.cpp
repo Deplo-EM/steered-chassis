@@ -50,6 +50,9 @@ void hello_world::imu::Imu::restartCalibration()
 {
   calibrated_ = false;
   sample_valid_ = false;
+  accel_cache_valid_ = false;
+  published_sample_ = false;
+  current_reject_ = ImuFaultKind::kNone;
   clock_seen_=accel_seen_=gyro_seen_=false;
   healthy_ = false;
   consecutive_bad_ = consecutive_good_ = 0;
@@ -76,7 +79,9 @@ void hello_world::imu::Imu::update()
   float sample_temperature = invalid;
   BMI088SampleInfo info;
   if (!bmi_.getData(sample_acc, sample_gyro, &sample_temperature, &info)) {
-    ++rej_transport_; RejectSample(); return;
+    ++rej_transport_;
+    RejectSample(ImuFaultKind::kSpi, hello_world::tick::GetTickMs());
+    return;
   }
   const uint32_t now=hello_world::tick::GetTickMs();
   if (!clock_seen_) {
@@ -85,35 +90,61 @@ void hello_world::imu::Imu::update()
     const uint32_t advance=(info.sensor_time-last_clock_)&0xFFFFFFu;
     if (advance>=0x800000u) {
       // 时钟回退/设备重启：原偏置与姿态不再可信，重新标定后再授权。
-      ++rej_clock_; restartCalibration(); RejectSample(); return;
+      ++rej_clock_;
+      restartCalibration();
+      RejectSample(ImuFaultKind::kClockBackward, now);
+      return;
     }
     if (advance>0) { last_clock_=info.sensor_time; last_clock_tick_=now; }
   }
-  if (info.accel_ready) { accel_seen_=true; last_accel_tick_=now; }
   if (info.gyro_discontinuity) {
     // 样本队列失去连续性，旧姿态不再可信，重新标定后才能恢复出力。
     restartCalibration();
-    RejectSample();
+    RejectSample(ImuFaultKind::kGyroFifo, now);
     return;
   }
   if (info.gyro_count != 0u) { gyro_seen_=true; last_gyro_tick_=now; }
+  if (info.accel_ready) {
+    accel_seen_ = true;
+    last_accel_tick_ = now;
+    // 坏加速度的判废独立于陀螺 FIFO，不能等到以后两者恰好同时出样。
+    const auto reason = ValidateAccel(sample_acc);
+    if (reason != ImuFaultKind::kNone) {
+      accel_cache_valid_ = false;
+      ++rej_sample_;
+      const float no_gyro[3] = {invalid, invalid, invalid};
+      RejectSample(reason, now, sample_acc,
+                   info.gyro_count != 0u ? info.gyro_batch[0] : no_gyro, sample_temperature);
+      return;
+    }
+    for (int i = 0; i < 3; ++i) accel_cache_[i] = sample_acc[i];
+    accel_cache_valid_ = true;
+  }
   if (!FreshnessOk(now)) {
     ++rej_fresh_;
-    if ((now - last_clock_tick_) > kImuFreshnessMs) ++stale_clock_;
-    if ((now - last_accel_tick_) > kImuFreshnessMs) ++stale_accel_;
-    if ((now - last_gyro_tick_) > kImuFreshnessMs) ++stale_gyro_;
+    if (clock_seen_ && (now - last_clock_tick_) > kImuFreshnessMs) ++stale_clock_;
+    if (accel_seen_ && (now - last_accel_tick_) > kImuFreshnessMs) ++stale_accel_;
+    if (gyro_seen_ && (now - last_gyro_tick_) > kImuFreshnessMs) ++stale_gyro_;
     return;
   }
-  if (info.gyro_count == 0u) return;  // 空队列不重复标定、积分或刷新有效样本。
+  // 空队列不积分；加速度判废后，必须等新的合格加速度才能恢复。
+  if (info.gyro_count == 0u || !accel_cache_valid_) return;
 
   // 先校验整个批次，再按顺序消费；坏帧不能部分污染标定或姿态。
+  if (!std::isfinite(sample_temperature)) {
+    ++rej_sample_;
+    RejectSample(ImuFaultKind::kTempInvalid, now, accel_cache_, info.gyro_batch[0], sample_temperature);
+    return;
+  }
   for (uint8_t i = 0; i < info.gyro_count; ++i) {
-    if (!IsSampleOk(sample_acc, info.gyro_batch[i], sample_temperature)) {
-      ++rej_sample_; RejectSample(); return;
+    if (!GyroValid(info.gyro_batch[i])) {
+      ++rej_sample_;
+      RejectSample(ImuFaultKind::kGyroInvalid, now, accel_cache_, info.gyro_batch[i], sample_temperature);
+      return;
     }
   }
   for (uint8_t i = 0; i < info.gyro_count; ++i) {
-    if (!ApplySample(sample_acc, info.gyro_batch[i], sample_temperature, now)) break;
+    if (!ApplySample(accel_cache_, info.gyro_batch[i], sample_temperature, now)) break;
   }
 }
 
@@ -121,6 +152,8 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
                                       float sample_temperature, uint32_t now)
 {
   sample_valid_ = true;
+  published_sample_ = true;
+  current_reject_ = ImuFaultKind::kNone;
   last_sample_tick_=now;
   for (int i = 0; i < 3; ++i) {
     acc_[i] = sample_acc[i];
@@ -187,6 +220,7 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
     if (!std::isfinite(angle)) {
       ++bad_samples_total_;
       restartCalibration();  // 解算状态异常需重建，不能把坏姿态交给控制层。
+      RecordRejected(ImuFaultKind::kAhrs, now, sample_acc, sample_gyro, sample_temperature);
       return false;
     }
   }
@@ -194,51 +228,86 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
   return true;
 }
 
+hello_world::imu::ImuFaultDetail hello_world::imu::Imu::faultDetail(uint32_t now) const
+{
+  ImuFaultDetail detail;
+  detail.calibrated = calibrated_;
+  detail.healthy = healthy_;
+  detail.sample_valid = isSampleValidAt(now);
+  if (clock_seen_) detail.clock_age_ms = now - last_clock_tick_;
+  if (accel_seen_) detail.accel_age_ms = now - last_accel_tick_;
+  if (gyro_seen_) detail.gyro_age_ms = now - last_gyro_tick_;
+  if (published_sample_) detail.sample_age_ms = now - last_sample_tick_;
+  detail.last_rejected = last_rejected_;
+
+  // 明确的判废优先；成功后只看当拍的状态与新鲜度，历史坏帧不冒充新故障。
+  if (!inited_) detail.reason = ImuFaultKind::kNotInitialized;
+  else if (current_reject_ != ImuFaultKind::kNone) detail.reason = current_reject_;
+  else if (clock_seen_ && detail.clock_age_ms > kImuFreshnessMs)
+    detail.reason = ImuFaultKind::kClockStale;
+  else if (accel_seen_ && detail.accel_age_ms > kImuFreshnessMs)
+    detail.reason = ImuFaultKind::kAccStale;
+  else if (gyro_seen_ && detail.gyro_age_ms > kImuFreshnessMs)
+    detail.reason = ImuFaultKind::kGyroStale;
+  else if (published_sample_ && detail.sample_age_ms > kImuFreshnessMs)
+    detail.reason = ImuFaultKind::kSampleStale;
+  else if (!calibrated_) detail.reason = ImuFaultKind::kNotCalibrated;
+  else if (!healthy_) detail.reason = ImuFaultKind::kUnhealthy;
+  return detail;
+}
+
 /* Private function definitions ----------------------------------------------*/
 
-void hello_world::imu::Imu::RejectSample()
+void hello_world::imu::Imu::RecordRejected(
+    ImuFaultKind kind, uint32_t now, const float* acc, const float* gyro, float temperature)
+{
+  current_reject_ = kind;
+  last_rejected_ = {};
+  last_rejected_.kind = kind;
+  last_rejected_.tick_ms = now;
+  if (acc != nullptr && gyro != nullptr) {
+    last_rejected_.has_values = true;
+    for (int i = 0; i < 3; ++i) {
+      last_rejected_.accel_mps2[i] = acc[i];
+      last_rejected_.gyro_radps[i] = gyro[i];
+    }
+    last_rejected_.temperature_c = temperature;
+  }
+}
+
+void hello_world::imu::Imu::RejectSample(
+    ImuFaultKind kind, uint32_t now, const float* acc, const float* gyro, float temperature)
 {
   sample_valid_=false;
+  RecordRejected(kind, now, acc, gyro, temperature);
   ++bad_samples_total_;
   if (consecutive_bad_<kImuBadSampleLimit) ++consecutive_bad_;
   if (consecutive_bad_>=kImuBadSampleLimit) healthy_=false;
   consecutive_good_=0;
 }
 
-bool hello_world::imu::Imu::IsSampleOk(
-    const float acc[3], const float gyro[3], float temperature) const
+hello_world::imu::ImuFaultKind hello_world::imu::Imu::ValidateAccel(const float acc[3])
 {
-  /* 判据（全部满足才认为这一个采样可信）：
-   *   1. 所有采样都是有限数（不是 NaN / Inf）；
-   *   2. 加速度模长在 [2, 40] m/s²：静止时约 9.79，剧烈运动也落在这个区间；
-   *      读回全 0 或全 0xFF 时会明显落在区间外；
-   *   3. 角速度绝对值 < 50 rad/s：任何正常的车都到不了这个量级。
-   *
-   * 传输状态、设备时钟和DRDY新鲜度在本函数前单独检查，不能用量级校验替代。
-   * 设备内部若持续伪造合理数值且时钟/DRDY仍正常，仍需独立硬件证据识别。 */
+  // 保持原判据；量级判据无法替代传输和数据新鲜度检查。
   constexpr float kAccNormMin = 2.0f;
   constexpr float kAccNormMax = 40.0f;
-  constexpr float kGyroAbsMax = 50.0f;
-
-  if (!std::isfinite(temperature)) return false;
 
   for (int i = 0; i < 3; ++i) {
-    if (!std::isfinite(acc[i]) || !std::isfinite(gyro[i])) {
-      return false;
-    }
+    if (!std::isfinite(acc[i])) return ImuFaultKind::kAccInvalid;
   }
 
   const float acc_norm = std::sqrt(acc[0] * acc[0] + acc[1] * acc[1] +
                                    acc[2] * acc[2]);
-  if (acc_norm < kAccNormMin || acc_norm > kAccNormMax) {
-    return false;
-  }
+  if (acc_norm < kAccNormMin) return ImuFaultKind::kAccLow;
+  if (acc_norm > kAccNormMax) return ImuFaultKind::kAccHigh;
+  return ImuFaultKind::kNone;
+}
 
+bool hello_world::imu::Imu::GyroValid(const float gyro[3])
+{
+  constexpr float kGyroAbsMax = 50.0f;
   for (int i = 0; i < 3; ++i) {
-    if (std::fabs(gyro[i]) > kGyroAbsMax) {
-      return false;
-    }
+    if (!std::isfinite(gyro[i]) || std::fabs(gyro[i]) > kGyroAbsMax) return false;
   }
-
   return true;
 }

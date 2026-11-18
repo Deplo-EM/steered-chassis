@@ -1,0 +1,21 @@
+// Ozone 3.26+ project: 云台 B17（B15 增益 + dead_reason 位 64：控制计算无效）。
+// ELF: Gimbal/build/dsh-gimbal-B17/steered_gimbal.elf
+// SHA-256: 8665F02A0BEDCA2A060D885937AA55BFADEDBDA1B3FDBAC14529B268115CAB91
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-gimbal-B17/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 底盘 编号35 复核候选（电流版，含 g_chassis_dbg）。
+// ELF: Chassis/build/steer-handoff-review/steered_chassis_steer_current_field.elf
+// SHA-256: 81D5351B27AC8641EB45F2E08A8C2266433F186218515AFD313BDD44D0C76A42
+// 改动：舵角越界拒绝并进 Dead、对齐门 0.35/0.30 回差、零速清积分、电流版 6000/400/120。
+// 安全：急停独立停机未核实前不要通电试车。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/steer-handoff-review/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+  Watch.Add("s_can_tx_fail_count");
+}

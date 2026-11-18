@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 底盘四轮下地候选（轮位重绑 LF=3/LB=4/RB=1/RF=2，四轮全开）。
+// ELF: Chassis/build/dsh-reorder-4w/steered_chassis_steer_current_field.elf
+// SHA-256: 3B3249200E1AA9DE129E7AC86D705EFE96A2A290022484C2221B8BEF4FB7248A
+// 注意：等效解翻转保持启用（快转可能跳 180°）；右后刮蹭轮已恢复参与控制。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-reorder-4w/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

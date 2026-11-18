@@ -1,7 +1,7 @@
 /**
  *******************************************************************************
  * @file      :ins_motor.cpp
- * @brief     : 云台板电机实例化（yaw / pitch 双达妙 DM-J4310）
+ * @brief     : 云台板 yaw / pitch 达妙电机实例化
  * @history   :
  *  Version     Date            Author          Note
  *  V1.0.0      2026-10-19      <author>        1. 完成电机配置
@@ -29,6 +29,7 @@
  */
 /* Includes ------------------------------------------------------------------*/
 #include "ins_motor.hpp"
+#include "gimbal_drive_feedback.hpp"
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -37,6 +38,8 @@ namespace {
 using hello_world::motor::AngleRange;
 using hello_world::motor::Dir;
 using hello_world::motor::DM_J4310;
+// 最新拓扑标注 DMJ620：它确认接线和 ID，但没有给出 MIT 的 P/V/T 量程。
+// 现有 DM_J4310 类型仅代表既有协议标度，待铭牌与电机只读参数核对后再替换。
 using hello_world::motor::InputType;
 using hello_world::motor::OptionalParams;
 using hello_world::motor::kDirFwd;
@@ -77,8 +80,8 @@ void InitMotors()
     opt.dir = kYawDir;
     opt.angle_offset = kYawAngleOffset;
     opt.max_torq_input_lim = kYawTorqueLimit;
-    /* auto_enable=true：上电自动使能；enable_mode_switch=false：固定 MIT 模式 */
-    s_yaw_motor.init(kYawId, opt, true, false);
+    /* 仅通信任务在有效授权后送使能帧；驱动编码器不自动使能。 */
+    s_yaw_motor.init(kYawId, opt, false, false);
   }
 
   {
@@ -88,7 +91,7 @@ void InitMotors()
     opt.dir = kPitchDir;
     opt.angle_offset = kPitchAngleOffset;
     opt.max_torq_input_lim = kPitchTorqueLimit;
-    s_pitch_motor.init(kPitchId, opt, true, false);
+    s_pitch_motor.init(kPitchId, opt, false, false);
   }
 
   s_inited = true;
@@ -108,6 +111,18 @@ hello_world::motor::Motor *GetMotorPitch()
 {
   InitMotors();
   return &s_pitch_motor;
+}
+
+robot::GimbalDriveFeedback GetGimbalDriveFeedback()
+{
+  const auto normally_disabled = [](const DM_J4310& motor) {
+    return motor.status_code() == DM_J4310::kMotorDisabled && !motor.faultLatched();
+  };
+  const bool yaw_disabled = normally_disabled(s_yaw_motor);
+  const bool pitch_disabled = normally_disabled(s_pitch_motor);
+  return {(yaw_disabled || s_yaw_motor.isHealthy()) &&
+              (pitch_disabled || s_pitch_motor.isHealthy()),
+          static_cast<uint8_t>(unsigned(yaw_disabled) | (unsigned(pitch_disabled) << 1u))};
 }
 
 /* Private function definitions ----------------------------------------------*/

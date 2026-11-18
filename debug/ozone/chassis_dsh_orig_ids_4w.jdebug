@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 对照用——电机 ID 恢复原始 {1,2,3,4}，其余同四轮地面版。
+// ELF: Chassis/build/dsh-orig-ids-4w/steered_chassis_steer_current_field.elf
+// SHA-256: 758C098F0C88CB3D7E5DC60AF615AB71266931BC5AB7D73C032871632F700C6A
+// 用途：判断"绕一个轮子转"是 ID 重绑造成的，还是解算器本身。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-orig-ids-4w/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

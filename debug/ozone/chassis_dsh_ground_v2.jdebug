@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 地面版 v2（原始 ID、判废恢复、方向旋转 180°、跟随加阻尼）。
+// ELF: Chassis/build/dsh-ground-v2/steered_chassis_steer_current_field.elf
+// SHA-256: 20F5808FFEA59CA8A6F043EDEA891FB402E2F0C0B5216D216124D2C9B7595058
+// 改动：vx/vy 同时取反（车头与代码 +x 相反）；kFollowKp 4.0→3.0、kFollowKd 0.15→0.5。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-ground-v2/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

@@ -12,9 +12,8 @@
  *  两组环的区别：
  *    - 轮速环：输入误差单位 rad/s（轮子转速），输出单位 A（电流）。
  *      1 m/s 车速 ≈ 15.2 rad/s 轮速（R=0.066m）。Kp 决定「差多少速度补多少电流」。
- *    - 舵角环：输入误差单位 rad，输出单位 raw（GM6020 电压，±25000）。
- *      GM6020 是电压驱动，本身带反电动势阻尼，所以纯 P 也能稳定，
- *      Kd 用来抑制大角度回摆时的超调（考核加分项「舵轮回摆抑制」）。
+ *    - 舵角环：输入误差单位 rad，输出沿用电压命令的 raw 数值标度。
+ *      电流版在传给电机之前换到 A；现场初测的映射和上限见 steer_output_profile.hpp。
  *******************************************************************************
  *  Copyright (c) 2024 Hello World Team, Zhejiang University.
  *  All Rights Reserved.
@@ -24,24 +23,45 @@
 #include "ins_pid.hpp"
 
 #include "pid.hpp"
+#include "steer_output_profile.hpp"
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+#include "ground_trial.hpp"
+#endif
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
 namespace {
 
 /* ---------------- 轮速环（4 个，参数相同） ---------------- */
-constexpr float kWheelPidKp = 0.35f;   ///< A / (rad/s)
-constexpr float kWheelPidKi = 1.50f;   ///< A / (rad/s·s)，消除稳态误差
+/* 2026-11-16 实车：空载时轮速在 ±30 rad/s、约 0.5 Hz 来回摆，电流只有 ±2 A。
+ * 2 A 就能把空载轮推到 ±30 rad/s，说明是积分主导的低频极限环，不是推力不足。
+ * B02：Kp 0.35→0.50、Ki 1.50→0.30，改比例主导、积分只修稳态。 */
+constexpr float kWheelPidKp = 0.50f;   ///< A / (rad/s)
+constexpr float kWheelPidKi = 0.30f;   ///< A / (rad/s·s)，消除稳态误差
 constexpr float kWheelPidKd = 0.0f;    ///< 速度环一般不用微分（反馈本来就抖）
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+constexpr float kWheelPidOutLim = robot::ground::kWheelCurrentA;
+#else
 constexpr float kWheelPidOutLim = 8.0f;   ///< 输出限幅，A（与电机电流限幅一致）
-constexpr float kWheelPidIntegralLim = 2.5f;  ///< 积分项限幅（等效最多贡献 3.75A）
+#endif
+constexpr float kWheelPidIntegralLim = 2.5f;  ///< 积分状态限幅；Ki × 限值 = 0.75 A。
 
 /* ---------------- 舵角环（4 个，参数相同） ---------------- */
-constexpr float kSteerPidKp = 10000.0f;  ///< raw / rad
-constexpr float kSteerPidKi = 2000.0f;   ///< raw / (rad·s)
-constexpr float kSteerPidKd = 150.0f;    ///< raw / (rad/s)
-constexpr float kSteerPidOutLim = 20000.0f;    ///< 电压限幅
-constexpr float kSteerPidIntegralLim = 1.0f;  ///< 积分状态限幅 rad·s，Ki×限幅=2000 raw
+/* 电流版沿用 B01 的参数，电压版保留原参数。降增益后仍有振荡，
+ * 所以不能仅凭输出翻号归因于 D 项；轨迹与对齐门另行验证。 */
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+// A/B 候选 A：R3 基线 7200/800/150 → 12000/2000/240。
+// 实车架空实测：R3 输出仅 0.2~0.3 A（上限 1.2 A），转向跟不上 2 rad/s 目标。
+constexpr float kSteerPidKp = 12000.0f;
+constexpr float kSteerPidKi = 2000.0f;
+constexpr float kSteerPidKd = 240.0f;
+#else
+constexpr float kSteerPidKp = robot::steer_output::kUseCurrent ? 6000.0f : 10000.0f;
+constexpr float kSteerPidKi = robot::steer_output::kUseCurrent ? 400.0f : 2000.0f;
+constexpr float kSteerPidKd = robot::steer_output::kUseCurrent ? 120.0f : 150.0f;
+#endif
+constexpr float kSteerPidOutLim = robot::steer_output::kPidOutputLimit;  ///< raw
+constexpr float kSteerPidIntegralLim = 1.0f;  ///< rad·s；输出积分上限等于 Ki 乘此值。
 
 hello_world::pid::Pid s_wheel_pids[4];
 hello_world::pid::Pid s_steer_pids[4];
@@ -57,8 +77,8 @@ void InitPids()
                          kWheelPidOutLim, kWheelPidIntegralLim);
     s_steer_pids[i].init(kSteerPidKp, kSteerPidKi, kSteerPidKd,
                          kSteerPidOutLim, kSteerPidIntegralLim);
-    /* 舵角反馈有量化噪声（8192 线），微分再做一次强低通 */
-    s_steer_pids[i].setDerivativeLpf(0.08f);
+    /* 电流版使用转速反馈；电压版保留原有的角度差分与滤波。 */
+    s_steer_pids[i].setDerivativeLpf(robot::steer_output::kUseCurrent ? 0.15f : 0.08f);
   }
   s_inited = true;
 }

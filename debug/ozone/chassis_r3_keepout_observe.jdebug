@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: R3 源码 + 舵轮卡点观测结构（只加观察，不改控制逻辑）。
+// ELF: Chassis/build/competition-r3-keepout-observe/steered_chassis_competition_finish.elf
+// SHA-256: 3D0063ADA7EC3A2EC73367355B15F535C75FFFFC040FBF2A25AD1181410CDB82
+// 注意：这是 R3 源码 + 观测结构的新候选，不是 competition-r3 的基线 ELF。
+void OnProjectLoad(void) {
+  Edit.SysVar (VAR_HSS_SPEED, FREQ_100_HZ);
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-keepout-observe/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

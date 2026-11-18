@@ -9,4 +9,7 @@ hello_world::motor::Motor* GetMotorYaw();
 hello_world::motor::Motor* GetMotorPitch();
 hello_world::remote_control::DT7* GetRemoteControl();
 robot::Robot* GetRobot();
+#ifdef TEST_CHASSIS
+robot::Chassis* GetChassis();
+#endif
 robot::GimbalChassisComm* GetGimbalChassisComm();

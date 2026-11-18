@@ -41,6 +41,14 @@
  * 读这个变量应为 true。
  */
 volatile bool g_reset_by_iwdg = false;
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+static_assert(!robot::kEnableFaultInjection, "Competition firmware must not contain fault injection");
+const char* volatile g_competition_build_tag = nullptr;
+#endif
+#if defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK
+static_assert(!robot::kEnableFaultInjection, "Ground trial must not contain fault injection");
+const char* volatile g_ground_build_tag = nullptr;
+#endif
 
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
@@ -59,6 +67,12 @@ void MainTaskInit(void) {
   /* 保存构建标签地址：保证字符串留在 .rodata 里，
    * 可用 strings 在固件文件上离线核对是不是安全版。 */
   robot::g_build_tag_addr = robot::g_build_tag;
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+  g_competition_build_tag = "COMPETITION-FINISH-GIMBAL-R3";
+#endif
+#if defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK
+  g_ground_build_tag = "GROUND-GIMBAL-DISARMED";
+#endif
 
   /* ---------- 1. 两个达妙电机 ---------- */
   hello_world::motor::Motor* yaw_motor = GetMotorYaw();

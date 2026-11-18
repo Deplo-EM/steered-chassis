@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: A 增益 + 前馈 + 绕过对齐门/堵转（实验版，四轮照常驱动）。
+// ELF: Chassis/build/competition-r3-steer-A-ff-free/steered_chassis_competition_finish.elf
+// SHA-256: BC50D2E9C8563BC1C5EA175380AA7904BA619DA21A4D14D64CD229C60CA17571
+// 注意：标题栏必须是 competition-r3-steer-A-ff-free；另外两版（-ff、-ff-nostall）还带对齐门。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-steer-A-ff-free/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+}

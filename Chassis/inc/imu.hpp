@@ -37,6 +37,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "BMI088.hpp"
+#include "imu_fault_detail.hpp"
 #include "mahony.hpp"
 #include "tick.hpp"
 
@@ -155,19 +156,27 @@ class Imu {
 
   /** 本次采样可用于控制；单帧异常立即 false，不等待长期健康迟滞。 */
   bool isSampleValid() const {
-    const uint32_t now=hello_world::tick::GetTickMs();
+    return isSampleValidAt(hello_world::tick::GetTickMs());
+  }
+
+  /** 与取证共用同一拍的时间；过期边界只定义一次。 */
+  bool isSampleValidAt(uint32_t now) const {
     return sample_valid_ && FreshnessOk(now) && (now-last_sample_tick_)<=kImuFreshnessMs;
   }
 
   /** 累计异常采样数（调试用） */
   uint32_t badSamples() const { return bad_samples_total_; }
+  ImuFaultDetail faultDetail(uint32_t now) const;
 
  private:
-  /** 本周期采样是否可信（有限值、加速度/角速度量级正常） */
-  bool IsSampleOk(const float acc[3], const float gyro[3], float temperature) const;
+  static ImuFaultKind ValidateAccel(const float acc[3]);
+  static bool GyroValid(const float gyro[3]);
 
   bool ApplySample(const float acc[3], const float gyro[3], float temperature, uint32_t now);
-  void RejectSample();
+  void RejectSample(ImuFaultKind kind, uint32_t now, const float* acc = nullptr,
+                    const float* gyro = nullptr, float temperature = 0.0f);
+  void RecordRejected(ImuFaultKind kind, uint32_t now, const float* acc,
+                      const float* gyro, float temperature);
   bool FreshnessOk(uint32_t now) const {
     return clock_seen_ && accel_seen_ && gyro_seen_ &&
       (now-last_clock_tick_)<=kImuFreshnessMs &&
@@ -209,6 +218,15 @@ class Imu {
   float euler_[3] = {0.0f, 0.0f, 0.0f};
   float temperature_ = 0.0f;
   float gyro_sample_freq_ = kImuSampleFreq;
+
+  // 只缓存 DRDY 确认且已校验的加速度；无新加速度时可以在原新鲜度窗口内配对陀螺。
+  float accel_cache_[3] = {};
+  bool accel_cache_valid_ = false;
+
+  // 取证用：成功采样清掉当拍原因，保留最近的坏样本供停机时复制。
+  bool published_sample_ = false;
+  ImuFaultKind current_reject_ = ImuFaultKind::kNone;
+  ImuRejectedSample last_rejected_;
 };
 
 }  // namespace imu

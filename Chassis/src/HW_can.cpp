@@ -31,6 +31,7 @@
 #include "robot.hpp"
 #include "tick.hpp"
 #include "can_tx_monitor.hpp"
+#include "board_wiring.hpp"
 #include "critical_section.hpp"
 
 /* Private variables ---------------------------------------------------------*/
@@ -46,7 +47,8 @@ static robot::CanTxMonitor* TxMonitor(CAN_HandleTypeDef* hcan) {
 }
 
 /* Private function prototypes -----------------------------------------------*/
-static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8]);
+static void DispatchCanFrame(const CAN_HandleTypeDef* bus, uint32_t std_id,
+                             const uint8_t data[8]);
 
 /* Exported function definitions ---------------------------------------------*/
 
@@ -87,20 +89,25 @@ bool CAN_Is_BusOff(const CAN_HandleTypeDef *hcan)
 
 bool CAN_AbortPendingTx(CAN_HandleTypeDef* hcan)
 {
+  robot::CriticalSection lock;
   auto* monitor=TxMonitor(hcan);
   if(!monitor) return false;
+  monitor->beginCancel();
   const bool ok=HAL_CAN_AbortTxRequest(hcan,CAN_TX_MAILBOX0|CAN_TX_MAILBOX1|CAN_TX_MAILBOX2)==HAL_OK;
   // HAL_OK只表示写入撤销请求；硬件全部邮箱空闲后才可忘记旧帧。
   const uint32_t empty=CAN_TSR_TME0|(CAN_TSR_TME0<<1)|(CAN_TSR_TME0<<2);
   const bool completed=ok && (hcan->Instance->TSR&empty)==empty;
-  if(completed) monitor->reset();
+  if(completed) monitor->confirmEmpty();
   return completed;
 }
 
 bool CAN_TxHealthy(CAN_HandleTypeDef* hcan)
 {
+  robot::CriticalSection lock;
   auto* monitor=TxMonitor(hcan);
   if(!monitor) return false;
+  // 撤销未确认时，即使另一个邮箱已空也不能放行新帧。
+  if (monitor->cancelling()) return CAN_AbortPendingTx(hcan) && !CAN_Is_BusOff(hcan);
   const uint32_t tsr=hcan->Instance->TSR;
   uint8_t pending=0,tx_ok=0;
   for(int i=0;i<3;++i) {
@@ -117,14 +124,16 @@ bool CAN_TxHealthy(CAN_HandleTypeDef* hcan)
   return ok;
 }
 
-bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
-                  uint8_t len)
+static robot::CanTxSubmitResult SubmitCan(CAN_HandleTypeDef* hcan, const uint8_t* msg,
+    uint32_t id, uint8_t len, robot::CanTxReceipt* receipt)
 {
-  if (!msg || len > 8 || id > 0x7FFu) return false;
+  using robot::CanTxSubmitResult;
+  if (!msg || len > 8 || id > 0x7FFu) return CanTxSubmitResult::kFault;
   robot::CriticalSection lock;
-  if (!CAN_TxHealthy(hcan)) return false;
+  if (!CAN_TxHealthy(hcan)) return CanTxSubmitResult::kFault;
+  if (receipt && receipt->status == robot::CanTxStatus::kPending) return CanTxSubmitResult::kFault;
   if (hcan->State != HAL_CAN_STATE_READY && hcan->State != HAL_CAN_STATE_LISTENING)
-    return false;
+    return CanTxSubmitResult::kFault;
   auto* monitor = TxMonitor(hcan);
   const uint32_t empty = hcan->Instance->TSR;
   for (int slot = 0; slot < 3; ++slot) {
@@ -137,15 +146,35 @@ bool CAN_Send_Msg(CAN_HandleTypeDef *hcan, uint8_t *msg, uint32_t id,
     hcan->Instance->TSR = 1u << (8 * slot); // 仅清本槽旧RQCP（W1C）
     mailbox.TIR = id << CAN_TI0R_STID_Pos;
     mailbox.TDTR = len;
-    mailbox.TDLR = uint32_t(msg[0]) | (uint32_t(msg[1]) << 8) |
-        (uint32_t(msg[2]) << 16) | (uint32_t(msg[3]) << 24);
-    mailbox.TDHR = uint32_t(msg[4]) | (uint32_t(msg[5]) << 8) |
-        (uint32_t(msg[6]) << 16) | (uint32_t(msg[7]) << 24);
-    monitor->submitted(mask, hello_world::tick::GetTickMs()); // 先登记，再允许硬件完成
+    // 调用方只需提供 DLC 个字节，其余邮箱字节清零。
+    uint32_t words[2] = {};
+    for (uint8_t i = 0; i < len; ++i) {
+      words[i / 4u] |= uint32_t(msg[i]) << (8u * (i % 4u));
+    }
+    mailbox.TDLR = words[0];
+    mailbox.TDHR = words[1];
+    monitor->submitted(mask, hello_world::tick::GetTickMs(), receipt); // 先登记，再允许硬件完成
     mailbox.TIR = uint32_t(mailbox.TIR) | CAN_TI0R_TXRQ;
-    return true;
+    return CanTxSubmitResult::kQueued;
   }
-  return false;
+  return CanTxSubmitResult::kBusy;
+}
+
+robot::CanTxSubmitResult CAN_TrySend(CAN_HandleTypeDef* hcan, const uint8_t* msg,
+                                    uint32_t id, uint8_t len)
+{
+  return SubmitCan(hcan, msg, id, len, nullptr);
+}
+
+bool CAN_Send_Msg(CAN_HandleTypeDef* hcan, uint8_t* msg, uint32_t id, uint8_t len)
+{
+  return CAN_TrySend(hcan, msg, id, len) == robot::CanTxSubmitResult::kQueued;
+}
+
+bool CAN_SendTracked(CAN_HandleTypeDef* hcan, const uint8_t* msg, uint32_t id,
+                     uint8_t len, robot::CanTxReceipt& receipt)
+{
+  return SubmitCan(hcan, msg, id, len, &receipt) == robot::CanTxSubmitResult::kQueued;
 }
 
 /**
@@ -161,7 +190,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
       /* 只接受「标准帧 + 数据帧 + 正好 8 字节」，其它一律丢弃 */
       if (rx_header1.IDE == CAN_ID_STD && rx_header1.RTR == CAN_RTR_DATA &&
           rx_header1.DLC == 8u) {
-        DispatchCanFrame(rx_header1.StdId, can1_rx_data);
+        DispatchCanFrame(hcan, rx_header1.StdId, can1_rx_data);
       }
     }
   }
@@ -180,7 +209,7 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
                              can2_rx_data) == HAL_OK) {
       if (rx_header2.IDE == CAN_ID_STD && rx_header2.RTR == CAN_RTR_DATA &&
           rx_header2.DLC == 8u) {
-        DispatchCanFrame(rx_header2.StdId, can2_rx_data);
+        DispatchCanFrame(hcan, rx_header2.StdId, can2_rx_data);
       }
     }
   }
@@ -195,19 +224,21 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *hcan)
  *        电机槽位编号与 Robot::notifyMotorRx 的约定一致：
  *        0~3 = 驱动轮，4~7 = 舵电机。
  */
-static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
+static void DispatchCanFrame(const CAN_HandleTypeDef* bus, uint32_t std_id,
+                             const uint8_t data[8])
 {
+  using namespace robot::wiring;
   robot::Robot *robot = GetRobot();
 
   // 云台原始遥控帧：独立检查分片序号/CRC/DBUS，再原子提交完整输入。
   auto* peer_comm = GetGimbalChassisComm();
-  if (peer_comm != nullptr && robot::DbusRelay::ownsId(std_id)) {
+  if (bus == Can(kChassisPeer) && peer_comm != nullptr && robot::DbusRelay::ownsId(std_id)) {
     (void)peer_comm->remote_relay().accept(std_id, data, hello_world::tick::GetTickMs());
     return;
   }
 
   /* ---- 驱动电机 M3508：反馈 ID = 0x200 + id ---- */
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; bus == Can(kChassisWheel) && i < 4; ++i) {
     hello_world::motor::Motor *motor = GetMotorWheel(i);
     if (motor == nullptr) {
       continue;
@@ -222,7 +253,7 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
   }
 
   /* ---- 转向电机 GM6020：反馈 ID = 0x204 + id ---- */
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; bus == Can(kChassisSteer) && i < 4; ++i) {
     hello_world::motor::Motor *motor = GetMotorSteer(i);
     if (motor == nullptr) {
       continue;
@@ -237,9 +268,8 @@ static void DispatchCanFrame(uint32_t std_id, const uint8_t data[8])
 
   /* ---- 双板通信帧（云台 → 底盘，0x211） ----
    * decode 内部会校验 CRC 并自己记录成功/失败计数；返回值在这里不额外处理。 */
-  robot::GimbalChassisComm *comm = GetGimbalChassisComm();
-  if ((comm != nullptr) && (comm->rx_id() == std_id)) {
-    (void)comm->decode(data);
+  if (bus == Can(kChassisPeer) && peer_comm != nullptr && peer_comm->rx_id() == std_id) {
+    (void)peer_comm->decode(data);
     return;
   }
 

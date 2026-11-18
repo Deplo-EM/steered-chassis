@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘舵角降增益候选（电流版 + g_chassis_dbg）。
+// ELF: Chassis/build/dsh-steer-B01/steered_chassis_steer_current_field.elf
+// SHA-256: B59C0AA1A3F1E7EA6D062292FEBBB66A50BF0A9F87B6F20E6E34563C5349CCF5
+// 改动：Kp 10000→6000、Ki 1000→400、Kd 600→120（仅电流版）。
+// 目的：消除 D 项放大 GM6020 原始转速噪声造成的舵角极限环。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-steer-B01/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

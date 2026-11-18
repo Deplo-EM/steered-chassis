@@ -16,7 +16,7 @@
  *  下面的 kSteerDir / kSteerAngleOffset / kWheelDir 已经按考核说明书
  *  （已补全版）6.2 的「方向 / 偏移」列**全部预置**，正常情况下不需要再试。
  *  上车时只需要做一次「验证」（不是标定）：
- *    第 1 步 给某个舵电机一个正电压，看轮子是否俯视逆时针转；
+ *    第 1 步 核对正舵向指令是否使轮组俯视逆时针转；
  *    第 2 步 给某个轮电机一个正电流，看轮子是否朝车头方向滚；
  *    第 3 步 把四个轮子摆正，读 `motor->angle()`，应都接近 0。
  *  若某台不符 → 说明该电机的接线/安装与说明书不一致，
@@ -34,6 +34,10 @@
  */
 /* Includes ------------------------------------------------------------------*/
 #include "ins_motor.hpp"
+#include "steer_output_profile.hpp"
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+#include "ground_trial.hpp"
+#endif
 /* Private macro -------------------------------------------------------------*/
 /* Private constants ---------------------------------------------------------*/
 
@@ -47,9 +51,11 @@ using hello_world::motor::OptionalParams;
 using hello_world::motor::kDirFwd;
 using hello_world::motor::kDirRev;
 
-/* ---------------- 驱动电机 M3508（4 个，挂 CAN1） ---------------- */
+/* ---------------- 驱动电机 M3508（4 个，底盘 CAN2） ---------------- */
 
-/** 电机 ID（1~4 共用 0x200 控制帧） */
+/** 电机 ID（1~4 共用 0x200 控制帧）。
+ *  当前四轮候选按 LF/LB/RB/RF 绑定。现有记录只定位了两个前轮；
+ *  后轮和舵/驱成对关系须按 docs/39 分别核验。 */
 constexpr uint8_t kWheelId[4] = {1, 2, 3, 4};
 
 /** 转向关系：1 = 正电流使轮子朝车头滚；-1 = 反。按标定第 2 步填。 */
@@ -58,12 +64,17 @@ constexpr Dir kWheelDir[4] = {kDirFwd, kDirFwd, kDirFwd, kDirFwd};
 /** 轮电机外置减速箱的额外减速比。1.0 = 直接用出厂 19.2:1（说明书 2.3） */
 constexpr float kWheelExternalReduRatio = 1.0f;
 
-/** 驱动电流软件限幅，单位 A（M3508 满量程 20A，这里先给一半） */
+/** 驱动电流软件限幅，单位 A；与轮速 PID 输出限幅一致。 */
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+constexpr float kWheelCurrentLimit = robot::ground::kWheelCurrentA;
+#else
 constexpr float kWheelCurrentLimit = 8.0f;
+#endif
 
-/* ---------------- 转向电机 GM6020（4 个，挂 CAN2） ---------------- */
+/* ---------------- 转向电机 GM6020（4 个，底盘 CAN1） ---------------- */
 
-/** 电机 ID（1~4 共用 0x1FF 电压控制帧） */
+/** 电机 ID（1~4 共用电压帧 0x1FF 或电流帧 0x1FE）。
+ *  候选与驱动轮使用同一组 ID；两类电机需独立确认对应轮位。 */
 constexpr uint8_t kSteerId[4] = {1, 2, 3, 4};
 
 /** 转向关系：说明书 6.2 给出四台转向电机均为「反向」 */
@@ -71,12 +82,6 @@ constexpr Dir kSteerDir[4] = {kDirRev, kDirRev, kDirRev, kDirRev};
 
 /** 舵角零点偏移，单位 rad（说明书 6.2「舵向零点角度偏移」，固定值） */
 constexpr float kSteerAngleOffset[4] = {2.61346f, -2.06844f, 0.00729f, 1.58518f};
-
-/** 转向电压软件限幅（GM6020 满量程 ±25000，给 80%）。仅电压模式下使用。 */
-constexpr float kSteerVoltageLimit = 20000.0f;
-
-/** 转向电流软件限幅（GM6020 电流模式 ±16384 ↔ ±3A，给 3A）。 */
-constexpr float kSteerCurrentLimit = 3.0f;
 
 /** 电机对象：函数内静态，第一次调用时构造（此时硬件时钟已初始化） */
 hello_world::motor::M3508 s_wheels[4];
@@ -102,11 +107,12 @@ void InitMotors()
 
   for (int i = 0; i < 4; ++i) {
     OptionalParams opt;
-    opt.input_type = InputType::kRaw;  ///< 电压控制（说明书 2.3：默认 kRaw，电流需上位机开环）
+    opt.input_type = robot::steer_output::kUseCurrent ? InputType::kCurr : InputType::kRaw;
     opt.angle_range = AngleRange::kNegPiToPosPi;  ///< 舵角用 [-π, π)
     opt.dir = kSteerDir[i];
     opt.angle_offset = kSteerAngleOffset[i];
-    opt.max_raw_input_lim = kSteerVoltageLimit;
+    opt.max_raw_input_lim = robot::steer_output::kPidOutputLimit;
+    opt.max_curr_input_lim = robot::steer_output::kFieldCurrentLimitA;
     s_steers[i].init(kSteerId[i], opt);
   }
 

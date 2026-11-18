@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: DSH PID B10（Yaw 压单向偏置：Kp=2.2、Ki=0.05、Kd=0.28、积分限幅 0.5）。
+// ELF: Gimbal/build/dsh-pid-B10/steered_gimbal.elf
+// SHA-256: B627DBA9F5C051F789BF3F59CA69787FC251562E5E9CDD8332890D70A6AC0EBF
+// 回退：B07（E60E5254…）
+// 额外诊断：g_gimbal_dbg.yaw_rate_cmd / stick_rh / yaw_err
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-pid-B10/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

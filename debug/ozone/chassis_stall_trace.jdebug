@@ -1,0 +1,18 @@
+// 正常底盘控制 + 只读舵向停滞记录。与旧实车 ELF 分开，打开工程不会自动烧录。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/stall-trace/steered_chassis.elf");
+  Watch.Add("uwTick");
+  Watch.Add("s_robot");
+  Watch.Add("s_chassis");
+  Watch.Add("robot::diag::g_steer_stall_tx");
+}

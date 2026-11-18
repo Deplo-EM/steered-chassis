@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 台架静摩擦特调（前馈 0.25 A + 关闭堵转锁存），四轮全开，电流版。
+// ELF: Chassis/build/dsh-friction-nostall-B02/steered_chassis_steer_current_field.elf
+// SHA-256: 8A7DC0974C89E2A9A50447517AE82496D3325952AE2265D480C1DCBDF060C880
+// 仅台架使用：关掉堵转锁存才能连续顶住刮蹭点观察；不能带上赛场。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-friction-nostall-B02/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

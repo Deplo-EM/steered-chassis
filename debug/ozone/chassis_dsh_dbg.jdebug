@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 底盘调试版（电流模式，含 robot::diag::g_chassis_dbg）。
+// ELF: Chassis/build/dsh-dbg/steered_chassis_steer_current_field.elf
+// SHA-256: 367E70C621C468DDD92395AAB9640589868E1374AF5CF9C4DF0E3435D7AAB306
+// 一个符号看全：state/estop/authorized、align_blocked_mask、转向四轮、轮速四轮。
+// 索引 0~3 = 左前、左后、右后、右前。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-dbg/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+  Watch.Add("s_can_tx_fail_count");
+}

@@ -133,6 +133,7 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
     if (d.dbus_online) flags |= (1u << 3);
     if (d.imu_ready) flags |= (1u << 4);
     if (d.pitch_at_limit) flags |= (1u << 5);
+    if (d.working && d.ground_disarmed) flags |= (1u << 6);
     tx_data[0] = flags;
 
     WriteInt16(tx_data, 1, FloatToInt16(d.yaw_joint, kAngleScale));
@@ -154,8 +155,14 @@ bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
   }
 
   const uint8_t flags = rx_data[0];
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+  constexpr uint8_t kG2cReservedMask = 0x80u;
+#else
+  // 普通底盘保持原协议约束，避免把首跑失能云台当成考核固件使用。
+  constexpr uint8_t kG2cReservedMask = 0xC0u;
+#endif
   const bool fields_ok = rx_data[5] == 0u &&
-      (code_part_ == CodePart::Chassis ? (flags & 0xC0u) == 0u
+      (code_part_ == CodePart::Chassis ? (flags & kG2cReservedMask) == 0u
                                     : ((flags >> 4) & 0x03u) <= 2u);
   if (!fields_ok) {
     ++rx_error_count_;
@@ -193,6 +200,7 @@ bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
     d.dbus_online = (flags & (1u << 3)) != 0;
     d.imu_ready = (flags & (1u << 4)) != 0;
     d.pitch_at_limit = (flags & (1u << 5)) != 0;
+    d.ground_disarmed = (flags & (1u << 6)) != 0;
 
     d.yaw_joint = Int16ToFloat(ReadInt16(rx_data, 1), kAngleScale);
     d.pitch_joint = Int16ToFloat(ReadInt16(rx_data, 3), kAngleScale);

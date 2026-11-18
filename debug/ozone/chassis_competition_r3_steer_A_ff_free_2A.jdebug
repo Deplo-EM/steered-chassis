@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 舵向电流上限提到 2.0 A（A 增益 + 前馈 + 放开对齐门）。
+// ELF: Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf
+// SHA-256: 2D74BA6E78206C9D9904868FF0B0D422F1A00F4EA830477B01A4BC866054EEE6
+// 注意：20000 raw 现在对应 2.0 A；前馈 0.70 A 的 raw 换算随之上调为 7000。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+}
+
+

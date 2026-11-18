@@ -30,6 +30,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "chassis_ik_solver.hpp"
+#include "chassis_debug.hpp"
 #include "module_state.hpp"
 #include "pid.hpp"
 
@@ -68,8 +69,9 @@ class Chassis {
    * @brief 下发速度指令（云台坐标系）并给出云台相对车头的偏航角
    * @param motion 云台系速度指令 (vx, vy, w)
    * @param delta  云台相对车头的偏航角 δ，单位 rad（取 G2C 帧里的 yaw_joint）
+   * @param keep_rotation 小陀螺使用旋转优先的轮速分配。
    */
-  void setMotion(const ChassisMotion& motion, float delta);
+  void setMotion(const ChassisMotion& motion, float delta, bool keep_rotation = false);
 
   /**
    * @brief 周期更新：逆解 → 闭环 → 下发（1kHz 调用一次）
@@ -79,12 +81,32 @@ class Chassis {
   /** 与遥控/对板在同一短临界区采集；纯模块调用时update会自行采集。 */
   void captureFeedback();
   bool feedbackHealthy() const { return feedback_healthy_; }
-  /** 全组对齐门当前是否已放行（诊断用） */
+  /** 有驱动需求且全组对齐门已放行（诊断用）。 */
   bool driveReady() const { return drive_ready_; }
+  /** 无法绕过已配置的干涉区时，通信层撤销旧电机帧。 */
+  uint8_t steerKeepoutBlockedMask() const { return steer_keepout_blocked_mask_; }
+  diag::SteerAngleFault steerAngleFault() const;
   /** 对齐门已等待的时长，ms（诊断用） */
   float alignPendingMs() const { return align_pending_ms_; }
-  /** 是否已因等待超时降级为逐轮放行（诊断用） */
+  /** 实时对齐超时。首跑锁存后的原因在 lastSteerStall() 保留。 */
   bool alignTimedOut() const { return align_timeout_; }
+  uint8_t alignBlockedMask() const { return align_blocked_mask_; }
+  uint8_t steerStallMask() const { return steer_stall_mask_; }
+  uint8_t alignmentAtStall() const { return alignment_at_stall_; }
+  /** 首个触发停机的周期。急停确认只清锁存，保留此记录直到下一次停机。 */
+  struct SteerStallSnapshot {
+    uint32_t sequence = 0;
+    uint8_t stall_mask = 0;
+    uint8_t alignment_mask = 0;
+    uint8_t alignment_timeout_mask = 0;  ///< 首跑：对齐时间用尽，而非舵 PID 大出力判据。
+    float measured_rad[kWheelNum] = {};
+    float target_rad[kWheelNum] = {};
+    float requested_raw[kWheelNum] = {};  ///< PID 标度；电流版不是 CAN 数据槽的值。
+    float feedback_amp[kWheelNum] = {};
+  };
+  const SteerStallSnapshot& lastSteerStall() const { return last_steer_stall_; }
+  /** 只由 Robot 在收到有效急停确认后调用。stop() 不解除故障。 */
+  void acknowledgeSteerStall() { steer_stall_mask_ = 0; }
 
   /**
    * @brief 所有电机输出归零（急停 / 未就绪 / 掉线时调用）
@@ -100,10 +122,22 @@ class Chassis {
   float delta() const { return delta_; }
 
  private:
-  /** 舵角误差超过这个值就不驱动轮子（rad） */
-  static constexpr float kSteerReadyAngle = 0.35f;  // ≈20°
-  /** 全组等待上限：超过这个时长仍对不齐，就降级为逐轮放行（ms） */
+  /** 舵角最大误差超过此值时撤销整组驱动；重新放行需回到更小的角差。 */
+  static constexpr float kSteerReadyAngle = 0.20f;
+  static constexpr float kSteerReentryAngle = 0.12f;
+  /** 整组等待超过此时长就报警（ms），不放宽驱动条件。 */
   static constexpr float kAlignTimeoutMs = 300.0f;
+  // 保守初值：有明显误差且持续大输出，但编码器没有可辨别的进展。
+  static constexpr float kStallOutputRaw = 8000.0f;
+  static constexpr float kStallErrorRad = 0.35f;
+  static constexpr float kStallProgressRad = 0.04f;
+  static constexpr float kStallTimeMs = 500.0f;
+  struct SteerProgress {
+    float angle = 0.0f;
+    float elapsed_ms = 0.0f;
+    bool positive = false;
+  };
+  void checkSteerProgress(int index, float angle, float error, float request_raw, float dt);
 
   hello_world::motor::Motor* wheels_[kWheelNum] = {nullptr};
   hello_world::motor::Motor* steers_[kWheelNum] = {nullptr};
@@ -117,10 +151,20 @@ class Chassis {
   bool ready_ = false;
   bool feedback_pending_ = false;
   bool feedback_healthy_ = false;
+  uint8_t steer_angle_fault_mask_ = 0;  ///< 本次采样中超出单圈范围或非有限的舵角。
+  uint8_t steer_keepout_blocked_mask_ = 0;
   bool drive_ready_ = false;      ///< 最近一次全组对齐结果
-  bool align_timeout_ = false;    ///< 已超时降级（逐轮放行）
+  bool keep_rotation_ = false;   ///< 对应当拍的小陀螺轮速分配请求。
+  bool align_timeout_ = false;    ///< 已超时，仍禁止驱动
   float align_pending_ms_ = 0.0f; ///< 对不齐已持续的时间
+  uint8_t align_blocked_mask_ = 0; ///< bit0–3 = 左前、左后、右后、右前
+  uint8_t steer_stall_mask_ = 0;   ///< 堵转锁存，急停确认后才清除
+  uint8_t alignment_at_stall_ = 0; ///< 最近一次停机时的对齐阻塞位，复位前供诊断
+  SteerStallSnapshot last_steer_stall_;
+  SteerProgress steer_progress_[kWheelNum];
   float steer_feedback_[kWheelNum] = {};
+  float steer_velocity_[kWheelNum] = {};  ///< 舵轴实测转速，rad/s；与舵角同方向。
+  float steer_current_[kWheelNum] = {};
   float wheel_velocity_[kWheelNum] = {};
 };
 

@@ -1,0 +1,18 @@
+// 固定架空台架专用。打开只加载符号；启动下载前隔离驱动力。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/probe/steered_chassis_steer_probe.elf");
+  Watch.Add("s_robot");
+  Watch.Add("robot::probe::g_steer_probe_phase");
+  Watch.Add("robot::probe::g_steer_probe_voltage");
+  Watch.Add("robot::probe::g_steer_probe_current");
+}

@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: R3 舵角增益 A/B 候选 A（Kp 12000 / Ki 2000 / Kd 240）。
+// ELF: Chassis/build/competition-r3-steer-gain-A/steered_chassis_competition_finish.elf
+// SHA-256: EABF1F7DC2F85295F0E1ADC2EB38222EBFE2796868646FC49E580D8EF1B82360
+// 对照：R3 基线 7200/800/150，ELF 在 Chassis/build/competition-r3。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-steer-gain-A/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+}

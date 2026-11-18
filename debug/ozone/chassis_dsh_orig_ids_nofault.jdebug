@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 对照用——原始 ID {1,2,3,4} + 跳过舵角越界判废（防直接 Dead）。
+// ELF: Chassis/build/dsh-orig-ids-nofault/steered_chassis_steer_current_field.elf
+// SHA-256: 0A6C4C361939F6DA20459510835D8DD150384B15ACC29C1B8624588512117E34
+// 其余：四轮全开、无对齐门、无舵向堵转、无前馈；跳过舵角越界判废是地面让步。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-orig-ids-nofault/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("last_dead_");
+  Watch.Add("uwTick");
+}

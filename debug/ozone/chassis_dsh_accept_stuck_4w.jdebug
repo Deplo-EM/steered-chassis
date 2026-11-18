@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 四轮地面版（接受右后刮擦卡死，四轮全驱动）。
+// ELF: Chassis/build/dsh-accept-stuck-4w/steered_chassis_steer_current_field.elf
+// SHA-256: 2EEAC77505272FDFD5D8531F751029641FA40AF65BB173CCB9EB8B64084FB53D
+// 特性：轮位重绑 {3,4,1,2}；无对齐门（drive_ready 只看是否有驱动需求）；
+//       无舵向堵转锁存；无前馈、无排除轮；翻转保留；轮速 0.50/0.30。
+// 代价：卡住的右后会拖胎/刮擦，且失去舵向堵转保护。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-accept-stuck-4w/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 云台 编号35 复核候选（B14 参数 + 本轮安全修补，含 g_gimbal_dbg）。
+// ELF: Gimbal/build/steer-handoff-paired-review/steered_gimbal.elf
+// SHA-256: 17BE54FC5BA38702588A8E8F363AEF427D5A2BE47EE71411E6568DFFF0B6896D
+// 改动：Yaw 合计力矩按电机与 PID 限幅的较小值钳位、以合计输出做抗积分饱和、停止清前馈；
+//       急停失能确认过期后不再复用。
+// 安全：急停独立停机未核实前不要通电试车。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/steer-handoff-paired-review/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

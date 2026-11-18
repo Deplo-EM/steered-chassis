@@ -1,0 +1,19 @@
+// 底盘收敛候选版。保留 GM6020 电流模式和停机诊断。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/axis-tune/steered_chassis_steer_current_field.elf");
+  Window.Add("Watched Data 1", "s_robot");
+  Window.Add("Watched Data 1", "s_chassis");
+  Window.Add("Watched Data 1", "s_solver");
+  Window.Add("Watched Data 1", "robot::diag::g_steer_stall_tx");
+  Window.Add("Watched Data 1", "robot::diag::g_cpu");
+}

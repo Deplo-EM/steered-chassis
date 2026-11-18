@@ -278,7 +278,11 @@ bool BMI088::getData(float acc_data[3], float gyro_data[3], float* temp_ptr,
     sample_info.sensor_time = uint32_t(time[0]) | (uint32_t(time[1])<<8) | (uint32_t(time[2])<<16);
   }
   float tmp[3], acc[3] = {}, gyro[3] = {}, temperature = 0;
-  if (acc_data != nullptr) {
+  // ACC_STATUS 未就绪时不读数据。状态读取与数据突发之间可能有新样本到达，
+  // 读取 ACC 数据会清 DRDY，导致这帧既未被登记，又不能在下一拍发现（手册 §5.3.3）。
+  // 不带 info 的调用保留直接读取当前寄存器值的行为。
+  const bool read_accel = acc_data != nullptr && (info == nullptr || sample_info.accel_ready);
+  if (read_accel) {
     tick::DelayUs(kCommWaitTimeUs); getAccData(tmp);
     arm_mat_vec_mult_f32(&rot_mat_, tmp, acc);
   }
@@ -314,7 +318,7 @@ bool BMI088::getData(float acc_data[3], float gyro_data[3], float* temp_ptr,
     arm_mat_vec_mult_f32(&rot_mat_, tmp, gyro);
   }
   if (!io_ok_) return false;
-  if (acc_data) memcpy(acc_data, acc, sizeof(acc));
+  if (read_accel) memcpy(acc_data, acc, sizeof(acc));
   if (gyro_data) memcpy(gyro_data, gyro, sizeof(gyro));
   if (temp_ptr) *temp_ptr=temperature;
   if (info) *info=sample_info;

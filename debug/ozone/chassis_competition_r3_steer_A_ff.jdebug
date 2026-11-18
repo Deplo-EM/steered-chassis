@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: R3 + A 增益 + 静摩擦前馈（实验版，非正式 R3）。
+// ELF: Chassis/build/competition-r3-steer-A-ff/steered_chassis_competition_finish.elf
+// SHA-256: 4BACE7A5FEB7E9310AB387EC0C532A74191E175D71A923E828639BD175975F6F
+// 前馈：|误差|>0.15 rad 且滤波后 |舵速|<0.6 时，补 0.70 A（方向随误差）。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-steer-A-ff/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+}

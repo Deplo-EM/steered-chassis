@@ -34,6 +34,8 @@
 #include "remote_input.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "offline_checker.hpp"
+#include "gimbal_drive_feedback.hpp"
+#include "imu_control_state.hpp"
 
 namespace hello_world {
 namespace imu {
@@ -86,16 +88,27 @@ class Robot {
   bool isEstopped() const { return estop_; }
   bool isRemoteOnline();
   bool areAllMotorsOnline();
-  /** 本周期下发资格，用于通信层停机沿撤销旧队列。 */
-  bool outputPermitted() const { return state_ == LifeState::kWorking && !estop_ && peer_online_ &&
-      peer_input_.alive && peer_input_.working && peer_input_.dbus_online &&
-      peer_input_.imu_ready && peer_input_.gimbal_enable && !peer_input_.estop; }
+  /** 本周期可发控制/使能帧；false 时通信层只能发失能。 */
+  bool outputPermitted() const {
+#if defined(ROBOT_GROUND_GIMBAL_LOCK) && ROBOT_GROUND_GIMBAL_LOCK
+    return false;
+#else
+    return drive_permitted_;
+#endif
+  }
+  /** 只在已授权且尚未给力矩时，给仍报告正常失能的轴送使能帧。 */
+  bool motorEnableRequested(int slot) const {
+    return outputPermitted() && !output_enabled_prev_ && slot >= 0 && slot < kMotorSlotNum &&
+           (drive_feedback_.disabled_mask & (1u << slot)) != 0u;
+  }
 
  private:
   void updateInput();
   void updateStateMachine();
   void applyOutput(float dt);
   void updateCommData();
+  void stopOutputs();
+  bool operatorEstopConfirmed() const;
 
   void enterState(LifeState next);
 
@@ -115,8 +128,14 @@ class Robot {
   GimbalChassisComm::ChassisData peer_input_;
   bool peer_online_ = false;
   bool motors_online_ = false;
+  GimbalDriveFeedback drive_feedback_;
+  ImuControlState imu_control_state_ = ImuControlState::kUnavailable;
 
   bool estop_ = false;
+  bool drive_permitted_ = false;       ///< 综合授权，可开始使能握手。
+  bool estop_ack_seen_ = false;        ///< 上电、故障或丢授权后需观察到有效急停档。
+  bool disabled_feedback_seen_ = false; ///< 禁止输出时，最近两轴均报告正常失能。
+  uint32_t arm_started_tick_ = 0;
   /** yaw 世界系目标（每周期归一化至 [-pi, pi)，误差也按最短角计算） */
   float yaw_target_world_ = 0.0f;
   /** 上一周期是否处于「允许出力」状态，用于检测使能上升沿 */

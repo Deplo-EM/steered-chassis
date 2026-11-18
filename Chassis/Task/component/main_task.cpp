@@ -50,6 +50,14 @@
  * 不加 static，保证在调试器的全局变量窗口里能按名字找到。
  */
 volatile bool g_reset_by_iwdg = false;
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+static_assert(!robot::kEnableFaultInjection, "Competition firmware must not contain fault injection");
+const char* volatile g_competition_build_tag = nullptr;
+#endif
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+static_assert(!robot::kEnableFaultInjection, "Ground trial must not contain fault injection");
+const char* volatile g_ground_build_tag = nullptr;
+#endif
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
@@ -70,6 +78,12 @@ void MainTaskInit(void) {
   /* 保存构建标签地址：保证字符串留在 .rodata 里，
    * 可用 strings 在固件文件上离线核对是不是安全版。 */
   robot::g_build_tag_addr = robot::g_build_tag;
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+  g_competition_build_tag = "COMPETITION-FINISH-CHASSIS-R3";
+#endif
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+  g_ground_build_tag = robot::ground::kMotionEnabled ? "GROUND-TRIAL-MOTION" : "GROUND-TRIAL-LOCKED";
+#endif
 
   /* ---------- 1. 电机：构造并配置 ID / 方向 / 减速比 ---------- */
   for (int i = 0; i < 4; ++i) {

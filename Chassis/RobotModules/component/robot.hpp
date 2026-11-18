@@ -39,9 +39,15 @@
 
 #include "module_state.hpp"
 #include "can_tx_guard.hpp"
+#include "chassis_debug.hpp"
 #include "remote_input.hpp"
+#include "imu_fault_detail.hpp"
+#include "imu_control_state.hpp"
 #include "gimbal_chassis_comm.hpp"
 #include "offline_checker.hpp"
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+#include "ground_trial.hpp"
+#endif
 
 namespace hello_world {
 namespace imu {
@@ -56,6 +62,39 @@ namespace robot {
 
 class Chassis;
 class GimbalChassisComm;
+
+/** 进入 Dead 的原因位。多个安全条件可在同一拍失效。 */
+enum DeadCause : uint8_t {
+  kDeadNone = 0,
+  kDeadSteerStall = 1u << 0,
+  kDeadCanTx = 1u << 1,
+  kDeadRemote = 1u << 2,
+  kDeadImu = 1u << 3,
+  kDeadMotor = 1u << 4,
+  kDeadPeer = 1u << 5,
+  kDeadNotArmed = 1u << 6,
+  kDeadInvalidState = 1u << 7,
+};
+
+/** 底盘只接受已通过急停确认的本地或云台转发遥控。 */
+enum class RemoteSource : uint8_t { kNone, kLocal, kGimbal };
+
+/** 只在进入 Dead 时记录；急停确认不清除。角速度为底盘命令，和云台转速无关。 */
+struct DeadSnapshot {
+  uint32_t tick_ms = 0;
+  uint32_t steer_stall_sequence = 0;
+  uint32_t can_failed_cycles = 0;
+  float vx_before_stop = 0.0f;
+  float vy_before_stop = 0.0f;
+  float w_before_stop = 0.0f;
+  uint8_t causes = kDeadNone;
+  ChassisMode mode = ChassisMode::kSeparate;
+  bool left_centered = false;
+  RemoteSource remote_source = RemoteSource::kNone;
+  RemoteInput remote;                  ///< 当拍选中的遥控输入（已过死区）。
+  hello_world::imu::ImuFaultDetail imu;  ///< causes 含 kDeadImu 时保存判废详情。
+  diag::SteerAngleFault steer_angle;     ///< causes 含 kDeadMotor 时记录舵角越界轮位。
+};
 
 /* Exported types ------------------------------------------------------------*/
 
@@ -100,14 +139,16 @@ class Robot {
   /* ---------------- 状态查询（调试 / 上层判断） ---------------- */
 
   LifeState lifeState() const { return state_; }
+  const DeadSnapshot& lastDead() const { return last_dead_; }
+  const DeadSnapshot& lastImuDead() const { return last_imu_dead_; }
   ChassisMode chassisMode() const { return mode_; }
   bool isEstopped() const { return estop_; }
   bool isRemoteOnline();
   bool areAllMotorsOnline();
   /** 本周期下发资格，用于通信层停机沿撤销旧队列。 */
-  bool outputPermitted() const { return state_ == LifeState::kWorking && !estop_; }
+  bool outputPermitted() const;
 
-  /** 当前（已做加速度限幅的）云台系速度指令 */
+  /** 当前加速度限幅后的速度指令；普通版用云台系，首跑版用车身系。 */
   const ChassisMotion& motion() const { return ramped_; }
 #if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
   const RemoteInput& probeRemote() const { return remote_input_; }
@@ -122,10 +163,16 @@ class Robot {
   void updateStateMachine();
   void generateCommand();
   void applyOutput();
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+  void applyGroundOutput();
+#endif
   void updateCommData();
 
   /* 内部工具 */
-  void enterState(LifeState next);
+  void enterState(LifeState next, uint32_t now, uint8_t dead_causes = kDeadNone);
+  uint8_t deadCauses(bool imu_ok, bool motors_ok, bool peer_ok) const;
+  void resetMotion();
+  bool leftCentered() const;
   void initWorkingTargets();
   ChassisMode readModeSwitch() const;
   bool readEstopSwitch() const;
@@ -144,6 +191,9 @@ class Robot {
   /* 状态机 */
   LifeState state_ = LifeState::kDead;
   uint32_t state_enter_tick_ = 0;
+  DeadSnapshot last_dead_;
+  DeadSnapshot last_imu_dead_;  ///< 只由含 kDeadImu 的停机更新，便于事后取证。
+  ImuControlState imu_control_state_ = ImuControlState::kUnavailable;
   bool initialized_ = false;
   CanTxGuard can_tx_guard_;
   RemoteInput remote_input_;
@@ -155,10 +205,17 @@ class Robot {
   ChassisMode mode_ = ChassisMode::kSeparate;
   bool estop_ = false;
   bool remote_armed_ = false;  ///< 上电/遥控失联/发送失败后需当前来源急停确认
-  enum class RemoteSource : uint8_t { kNone, kLocal, kGimbal };
+  bool remote_was_online_ = false;  ///< 遥控在线边沿：连上时把 pitch 抬平
+  bool pitch_level_pending_ = false; ///< 进入 Working 后把 pitch 以斜坡抬平
+  bool estop_prev_ = false;         ///< 急停边沿：每次解除都重新抬平
   RemoteSource remote_source_ = RemoteSource::kNone; ///< 来源只能通过新来源急停确认选定
   bool local_estop_ = false; ///< 即使当前使用云台遥控，本地有效急停仍有最高优先级
   ChassisMotion ramped_;  ///< 加速度限幅后的云台系速度指令
+#if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
+  ground::StartGate ground_gate_;  ///< 首跑起步与松杆状态，独立于板的 Working。
+#endif
+  float steering_ref_yaw_ = 0.0f;  ///< 平移参考角；分离档松杆减速期间保留松杆前的角度。
+  bool steering_ref_held_ = false;
   float gimbal_yaw_rate_ = 0.0f;
   float gimbal_pitch_target_ = 0.0f;
 };

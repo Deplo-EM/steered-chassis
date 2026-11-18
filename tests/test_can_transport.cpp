@@ -45,6 +45,7 @@ void Error_Handler(){}
 robot::Robot* GetRobot(){return nullptr;}
 robot::GimbalChassisComm relay_comm(robot::GimbalChassisComm::CodePart::Chassis,0x210,0x211);
 robot::GimbalChassisComm* GetGimbalChassisComm(){return &relay_comm;}
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef*);
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef*);
 hello_world::motor::Motor* GetMotorWheel(int){return nullptr;}
 hello_world::motor::Motor* GetMotorSteer(int){return nullptr;}
@@ -75,6 +76,7 @@ int main(){
   CHECK(CAN_Send_Msg(&hcan1,f,0x201,8));
   CHECK(CAN_Send_Msg(&hcan1,f,0x202,8));
   CHECK(!CAN_Send_Msg(&hcan1,f,0x203,8));
+  CHECK(CAN_TrySend(&hcan1,f,0x210,8) == robot::CanTxSubmitResult::kBusy);
   reg1.TSR|=CAN_TSR_TME0|3u;
   CHECK(CAN_TxHealthy(&hcan1)); CHECK((reg1.TSR&3u)==0u);
   reg1.TSR|=(CAN_TSR_TME0<<1)|(9u<<8);
@@ -86,7 +88,9 @@ int main(){
   CHECK(!CAN_Send_Msg(&hcan1,nullptr,0x200,8));
   CHECK(!CAN_Send_Msg(&hcan1,f,0x800,8));
   CHECK(!CAN_Send_Msg(&hcan1,f,0x200,9));
-  reg1.ESR=CAN_ESR_BOFF; CHECK(!CAN_TxHealthy(&hcan1)); reg1.ESR=0;
+  reg1.ESR=CAN_ESR_BOFF;
+  CHECK(CAN_TrySend(&hcan1,f,0x210,8) == robot::CanTxSubmitResult::kFault);
+  CHECK(!CAN_TxHealthy(&hcan1)); reg1.ESR=0;
   // HAL接受撤销请求不等于邮箱已空；必须保留追踪并等待确认，不能遗忘旧帧。
   CHECK(CAN_Send_Msg(&hcan1,f,0x200,8));
   abort_deferred=true;
@@ -111,12 +115,51 @@ int main(){
   CHECK(reg1.sTxMailBox[0].TDTR==8u);
   CHECK(reg1.sTxMailBox[0].TDLR==0x44332211u);
   CHECK(reg1.sTxMailBox[0].TDHR==0x88776655u);
+  Complete(true);
+  CHECK(CAN_TxHealthy(&hcan1));
+  // 调用方只授权读取 DLC 个字节，缓冲区尾部不能带进邮箱。
+  CHECK(CAN_Send_Msg(&hcan1,payload,0x321,3));
+  CHECK(reg1.sTxMailBox[0].TDTR==3u);
+  CHECK(reg1.sTxMailBox[0].TDLR==0x00332211u && reg1.sTxMailBox[0].TDHR==0u);
   CHECK(CAN_AbortPendingTx(&hcan1));hcan1.State=0;
   CHECK(!CAN_Send_Msg(&hcan1,payload,0x321,8));hcan1.State=HAL_CAN_STATE_LISTENING;
+
+  // 超时后的撤销并非同步完成，即使有其他空邮箱也不得提交新指令。
+  CHECK(CAN_Send_Msg(&hcan1,f,0x1FF,8));
+  now+=2; abort_deferred=true;
+  CHECK(!CAN_TxHealthy(&hcan1));
+  CHECK((reg1.TSR & CAN_TSR_TME0)==0);
+  CHECK(!CAN_TxHealthy(&hcan1));
+  CHECK(!CAN_Send_Msg(&hcan1,f,0x1FF,8));
+  abort_deferred=false;
+  CHECK(CAN_AbortPendingTx(&hcan1));
+  CHECK(CAN_TrySend(&hcan1,f,0x210,8) == robot::CanTxSubmitResult::kQueued);
+  Complete(true);
+  CHECK(CAN_TxHealthy(&hcan1));
+  robot::CanTxReceipt receipt;
+  CHECK(CAN_SendTracked(&hcan1,f,0x1FF,8,receipt));
+  CHECK(receipt.status == robot::CanTxStatus::kPending);
+  Complete(true);
+  CHECK(CAN_TxHealthy(&hcan1));
+  CHECK(receipt.status == robot::CanTxStatus::kSent);
+  CHECK(CAN_SendTracked(&hcan1,f,0x1FF,8,receipt));
+  now+=2; abort_deferred=true;
+  CHECK(!CAN_TxHealthy(&hcan1));
+  CHECK(receipt.status == robot::CanTxStatus::kUnconfirmed);
+  CHECK(!CAN_SendTracked(&hcan1,f,0x1FF,8,receipt));
+  abort_deferred=false;
+  CHECK(CAN_AbortPendingTx(&hcan1));
 #ifdef TEST_CHASSIS
   robot::DbusRelay source;
   uint8_t raw[18]={0,4,0x20,0,1,0x68,0,0,0,0,0,0,0,0,0,0,0,4};
   CHECK(source.publish(raw,now));
+  for(int part=0;part<3;++part) {
+    CHECK(source.peekTx(now,rx_id,rx_payload));rx_ready=true;
+    HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);source.txAccepted();
+  }
+  CHECK(!relay_comm.remote_relay().online(now)); // 错误总线不能授权遥控。
+  CHECK(source.publish(raw,now+1));
+  ++now;
   for(int part=0;part<3;++part) {
     CHECK(source.peekTx(now,rx_id,rx_payload));rx_ready=true;
     HAL_CAN_RxFifo1MsgPendingCallback(&hcan2);source.txAccepted();

@@ -1,0 +1,21 @@
+// Ozone 3.26+ project: 首跑失能云台（只转发遥控，Yaw/Pitch 只接收失能指令）。
+// ELF: Gimbal/build/ground-trial-disarmed/steered_gimbal_ground_disarmed.elf
+// SHA-256: 013D4E124C4F2B11F4E7B060052FBFAD9D37616E0721F733E054DDFF66D5E945
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/ground-trial-disarmed/steered_gimbal_ground_disarmed.elf");
+
+  Watch.Add("g_ground_build_tag");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

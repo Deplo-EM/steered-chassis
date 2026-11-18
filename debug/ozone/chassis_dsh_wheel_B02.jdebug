@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘轮速环重调候选（电流版 + g_chassis_dbg）。
+// ELF: Chassis/build/dsh-wheel-B02/steered_chassis_steer_current_field.elf
+// SHA-256: EC64655390E423FA0F042FEA024B68B098B0A38DB95D6AA50961683901C98CCA
+// 改动：轮速环 Kp 0.35→0.50、Ki 1.50→0.30；新增 g_chassis_dbg.wheel_target[4]（轮速目标 rad/s）。
+// 注意：本版未包含“卡死轮超时放行”，舵角必须能对齐才会驱动。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-wheel-B02/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

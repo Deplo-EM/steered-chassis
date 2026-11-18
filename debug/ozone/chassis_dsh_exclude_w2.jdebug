@@ -1,0 +1,23 @@
+// Ozone 3.26+ project: 底盘排除右后轮（索引 2），其余三轮正常控制（电流版 + g_chassis_dbg）。
+// ELF: Chassis/build/dsh-exclude-w2/steered_chassis_steer_current_field.elf
+// SHA-256: 72612982DC8D7833610329EDE958D632775FB8C4FF721FCFFA19AE7FB15A1DCF
+// 改动：wheel_target[4] 新增；轮速环 0.50/0.30；排除轮 2：角度判废/对齐门/堵转/输出全部忽略。
+// 注意：只用于台架调其余三轮；实车四轮方案需另定。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/dsh-exclude-w2/steered_chassis_steer_current_field.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

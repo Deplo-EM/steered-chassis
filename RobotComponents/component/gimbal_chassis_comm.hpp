@@ -38,7 +38,8 @@
  *            bit3 dbus_online  云台板遥控器在线
  *            bit4 imu_ready    云台板 IMU 零漂标定完成
  *            bit5 pitch_at_limit pitch 已到软件限位
- *            bit6~7 保留
+ *            bit6 ground_disarmed  首跑失能版确认两轴反馈均为正常失能；仅首跑底盘接收
+ *            bit7 保留
  *   byte 1~2: yaw_joint     int16，单位 0.0001 rad（yaw 关节实际角，即 δ）
  *   byte 3~4: pitch_joint   int16，单位 0.0001 rad（pitch 关节实际角）
  *   byte 5   : 保留（填 0）
@@ -109,7 +110,7 @@ class GimbalChassisComm {
     bool working = false;      ///< 状态机处于 Working
     bool estop = false;        ///< 急停
     bool dbus_online = false;  ///< 底盘选定遥控源在线
-    bool imu_ready = false;    ///< 本板 IMU 零漂标定完成
+    bool imu_ready = false;    ///< 底盘 IMU 当前可用（诊断状态，不是云台使能位）。
     bool gimbal_enable = false;///< 允许云台输出（急停 / 未就绪时为 false）
 
     ChassisMode mode = ChassisMode::kSeparate;  ///< 底盘工作模式
@@ -126,6 +127,7 @@ class GimbalChassisComm {
     bool dbus_online = false;
     bool imu_ready = false;
     bool pitch_at_limit = false;
+    bool ground_disarmed = false;  ///< G2C bit6；首跑专用，普通构建保持为 0。
 
     float yaw_joint = 0.0f;    ///< yaw 关节实际角（云台相对底盘的偏航角 δ），rad
     float pitch_joint = 0.0f;  ///< pitch 关节实际角，rad

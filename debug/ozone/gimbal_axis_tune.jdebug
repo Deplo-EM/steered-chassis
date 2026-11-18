@@ -1,0 +1,19 @@
+// 云台收敛候选版。打开工程只加载 ELF，不自动连接或烧录。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/axis-tune/steered_gimbal.elf");
+  Window.Add("Watched Data 1", "s_robot");
+  Window.Add("Watched Data 1", "s_gimbal");
+  Window.Add("Watched Data 1", "s_yaw_pid");
+  Window.Add("Watched Data 1", "s_pitch_pid");
+  Window.Add("Watched Data 1", "robot::diag::g_cpu");
+}
