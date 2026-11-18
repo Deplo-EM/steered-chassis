@@ -32,8 +32,6 @@ volatile GimbalDebug g_gimbal_dbg = {};
 /* Private constants ---------------------------------------------------------*/
 /** 判定「到限位」的余量，rad */
 constexpr float kPitchLimitMargin = 0.02f;
-/** 限位保持的退出回差：目标退回限位内侧超过此值才恢复 PID。 */
-constexpr float kPitchHoldExitRad = 0.02f;
 /* Private types -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
 /* External variables --------------------------------------------------------*/
@@ -145,40 +143,22 @@ void robot::Gimbal::update(float dt, float yaw_world_meas, float yaw_world_rate)
   pitch_feedforward = kPitchGravityFf * std::cos(pitch_joint);
 #endif
   // 重力项和反馈一起受执行器限幅，正常饱和不再触发 setInput 越界。
+  float pitch_input = pitch_pid_->updateWithFeedforward(
+      pitch_err, pitch_joint_rate_, dt, pitch_feedforward, pitch_torque_limit);
+  if (!std::isfinite(yaw_input) || !std::isfinite(pitch_input)) {
+    stop();
+    return;
+  }
+  // 反馈到达软件边界后禁止向外顶住；清积分避免多周期反复施加外向力矩。
+  // 允许向内脱离边界；机械限位必须仍留出制动距离并在台架标定。
   pitch_at_limit_ = pitch_target_ >= kPitchUpperLimit - kPitchLimitMargin ||
                     pitch_target_ <= kPitchLowerLimit + kPitchLimitMargin ||
                     pitch_joint >= kPitchUpperLimit - kPitchLimitMargin ||
                     pitch_joint <= kPitchLowerLimit + kPitchLimitMargin;
-  const bool at_upper = pitch_joint >= kPitchUpperLimit - kPitchLimitMargin;
-  const bool at_lower = pitch_joint <= kPitchLowerLimit + kPitchLimitMargin;
-
-  /* 到限位后的“保持”：目标必须往限位内侧退过回差才恢复 PID。
-   * 保持期间完全不出力（让机械止点承力），不再每周期重算，
-   * 否则 PID 会以 1 kHz 反复算出力矩又被清零，形成方波驱动 → 电机狂抖。 */
-  if (pitch_limit_hold_) {
-    const bool still_hold = pitch_limit_hold_high_
-        ? (pitch_target_ > kPitchUpperLimit - kPitchHoldExitRad)
-        : (pitch_target_ < kPitchLowerLimit + kPitchHoldExitRad);
-    if (!still_hold) {
-      pitch_limit_hold_ = false;
-      pitch_pid_->reset();  // 离开限位只清一次，避免旧积分把炮管冲出去
-    }
-  }
-
-  float pitch_input = 0.0f;
-  if (!pitch_limit_hold_) {
-    pitch_input = pitch_pid_->updateWithFeedforward(
-        pitch_err, pitch_joint_rate_, dt, pitch_feedforward, pitch_torque_limit);
-    if ((at_upper && pitch_input > 0.0f) || (at_lower && pitch_input < 0.0f)) {
-      pitch_limit_hold_ = true;
-      pitch_limit_hold_high_ = at_upper;
-      pitch_pid_->reset();
-      pitch_input = 0.0f;
-    }
-  }
-  if (!std::isfinite(yaw_input) || !std::isfinite(pitch_input)) {
-    stop();
-    return;
+  if ((pitch_joint >= kPitchUpperLimit && pitch_input > 0.0f) ||
+      (pitch_joint <= kPitchLowerLimit && pitch_input < 0.0f)) {
+    pitch_pid_->reset();
+    pitch_input = 0.0f;
   }
   using hello_world::motor::Status;
   if (yaw_motor_->setInput(yaw_input) != Status::kOk ||
@@ -210,8 +190,6 @@ void robot::Gimbal::stop()
 {
   control_valid_ = false;
   feedback_pending_=false;
-  pitch_limit_hold_ = false;
-  pitch_limit_hold_high_ = false;
   yaw_rate_ff_ = 0.0f;
   diag::g_gimbal_dbg.yaw_err = 0.0f;
   diag::g_gimbal_dbg.yaw_ff_torque = 0.0f;
@@ -230,8 +208,6 @@ void robot::Gimbal::resetControllers()
 {
   if (yaw_pid_ != nullptr) yaw_pid_->reset();
   if (pitch_pid_ != nullptr) pitch_pid_->reset();
-  pitch_limit_hold_ = false;
-  pitch_limit_hold_high_ = false;
 }
 
 float robot::Gimbal::yawJoint() const

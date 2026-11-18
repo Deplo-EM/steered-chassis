@@ -150,10 +150,6 @@ class Gimbal {
   float yaw_rate_ff_ = 0.0f;   ///< yaw 速率前馈输入 rad/s
   float pitch_target_ = 0.0f;  ///< 关节目标角
   bool pitch_at_limit_ = false;
-  /** 到限位后的“保持”状态：为 true 时不再每周期重算 PID，直接出 0，
-   *  避免 1 kHz 反复“算出力矩→清零”形成方波把电机抖响。 */
-  bool pitch_limit_hold_ = false;
-  bool pitch_limit_hold_high_ = false;  ///< 保持的是上限(true)还是下限(false)
   bool ready_ = false;
   bool feedback_pending_ = false;
   bool feedback_valid_ = false;
