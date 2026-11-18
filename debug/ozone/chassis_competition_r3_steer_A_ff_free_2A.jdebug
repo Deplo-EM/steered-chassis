@@ -1,6 +1,6 @@
 // Ozone 3.26+ project: 舵向电流上限提到 2.0 A（A 增益 + 前馈 + 放开对齐门）。
 // ELF: Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf
-// SHA-256: 9F70A950BD174911359B30044C13A4D49914A5FFD101DF19067E37DC636F22FE
+// SHA-256: 6D5BA2EB3260E438FD5B58202CF51647A70389A63B46EC62D70CC2D1592DE0B0
 // 注意：20000 raw 现在对应 2.0 A；前馈 0.70 A 的 raw 换算随之上调为 7000。
 void OnProjectLoad(void) {
   Project.SetDevice("STM32F407IG");
@@ -20,6 +20,7 @@ void OnProjectLoad(void) {
   Watch.Add("s_robot");
   Watch.Add("uwTick");
 }
+
 
 
 
