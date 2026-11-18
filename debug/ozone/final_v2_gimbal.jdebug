@@ -1,0 +1,22 @@
+// Ozone 3.26+ project: 最终版 v2 —— 云台（pitch 下限 -0.44）。
+// ELF: Gimbal/build/dsh-gimbal-B25-harder/steered_gimbal.elf
+// SHA-256: E89579805E8936E07503A180EED12FA00A47C335B3D00E641E80E5E39BF48302
+// 特性：yaw 4.5/0.05/0.70、pitch 11/2.0/0.70、重力前馈 1.4、pitch 水平补偿。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Gimbal/build/dsh-gimbal-B25-harder/steered_gimbal.elf");
+
+  Watch.Add("robot::diag::g_gimbal_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}

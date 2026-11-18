@@ -1,0 +1,24 @@
+// Ozone 3.26+ project: 最终版 v2 —— 底盘（pitch 下限 -0.44）。
+// ELF: Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf
+// SHA-256: 9F70A950BD174911359B30044C13A4D49914A5FFD101DF19067E37DC636F22FE
+// 特性：A 增益（舵角 12000/2000/240）、2.0 A 舵向电流、静摩擦前馈 0.70 A、
+//       放开对齐门/堵转、跟随 Kp8/Kd1、pitch 水平补偿。
+void OnProjectLoad(void) {
+  Project.SetDevice("STM32F407IG");
+  Project.SetHostIF("USB", "0");
+  Project.SetTargetIF("SWD");
+  Project.SetTIFSpeed("1 MHz");
+  Project.AddSvdFile("$(InstallDir)/Config/CPU/Cortex-M4.svd");
+  Project.AddSvdFile("$(InstallDir)/Config/Peripherals/STM32F407IG.svd");
+  Edit.SysVar(VAR_VERIFY_DOWNLOAD, 1);
+  Edit.SysVar(VAR_ALLOW_BMA_EMULATION, 0);
+  Debug.SetConnectMode(CM_DOWNLOAD_RESET);
+  Debug.SetResetMode(RM_SET_RESET_AND_RUN);
+  File.Open("$(ProjectDir)/../../Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf");
+
+  Watch.Add("robot::diag::g_chassis_dbg");
+  Watch.Add("robot::diag::g_keepout_dbg");
+  Watch.Add("s_robot");
+  Watch.Add("uwTick");
+  Watch.Add("g_reset_by_iwdg");
+}
