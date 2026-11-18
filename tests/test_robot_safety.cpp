@@ -814,17 +814,17 @@ int main() {
   CHECK(controller.lifeState()==robot::LifeState::kWorking);
   CHECK(controller.isRemoteOnline());CHECK(!OutputsZero());
   TestSeparateRelease();
-  // 自动抬平期间，明显的向下指令立即接管；两板共用 -0.47 rad 下限。
+  // 自动抬平期间，明显的向下指令立即接管；两板共用 -0.44 rad 下限。
   peer.gimbal_data().pitch_joint = -0.30f;
   right_bias = -330;
   for (int i=0;i<20;++i) Step(true);
   for (int i=0;i<50;++i) Step();
   CHECK(comm.chassis_data().pitch_target < -0.31f);
   for (int i=0;i<400;++i) Step();
-  CHECK(std::fabs(comm.chassis_data().pitch_target + 0.47f) < 0.00001f);
+  CHECK(std::fabs(comm.chassis_data().pitch_target + 0.44f) < 0.00001f);
   right_bias = 330;
   for (int i=0;i<20;++i) Step();
-  CHECK(comm.chassis_data().pitch_target > -0.46f);
+  CHECK(comm.chassis_data().pitch_target > -0.43f);
   right_bias = 0;
   left_switch=3;for(int i=0;i<6;++i) Step();CHECK(controller.chassisMode()==robot::ChassisMode::kFollow);
   left_switch=2;for(int i=0;i<6;++i) Step();CHECK(controller.chassisMode()==robot::ChassisMode::kSpin);
