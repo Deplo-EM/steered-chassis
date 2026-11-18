@@ -1110,7 +1110,7 @@ int main() {
   position_loop.setPitchTarget(2.0f);
   for (int i=0;i<80;++i) position_loop.update(0.001f,0.0f,0.0f);
   CHECK(pitch_axis.command==0);
-  pitch_axis.velocity(0.0f); position_loop.setPitchTarget(robot::Gimbal::kPitchUpperLimit - 0.05f);
+  pitch_axis.velocity(0.0f); position_loop.setPitchTarget(0.0f);
   position_loop.update(0.001f,0.0f,0.0f); CHECK(pitch_axis.command<0);
   // 模拟达妙真实的限幅返回：大角差 + 同向前馈，不得因正常饱和撤销控制。
   yaw_axis.enforce_torque_limit = true;

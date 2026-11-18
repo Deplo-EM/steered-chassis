@@ -149,16 +149,19 @@ void robot::Gimbal::update(float dt, float yaw_world_meas, float yaw_world_rate)
     stop();
     return;
   }
-  // 反馈到达软件边界后禁止向外顶住；清积分避免多周期反复施加外向力矩。
-  // 允许向内脱离边界；机械限位必须仍留出制动距离并在台架标定。
+  /* 到限位附近：压住 P 的“向外顶”分量，但保留重力前馈——
+   * 这样炮管既不会顶着止点抖，也不会因为出力清零而掉下来。
+   * 不再每周期 reset：那会形成 1 kHz 方波，正是之前狂抖的来源。 */
   pitch_at_limit_ = pitch_target_ >= kPitchUpperLimit - kPitchLimitMargin ||
                     pitch_target_ <= kPitchLowerLimit + kPitchLimitMargin ||
                     pitch_joint >= kPitchUpperLimit - kPitchLimitMargin ||
                     pitch_joint <= kPitchLowerLimit + kPitchLimitMargin;
-  if ((pitch_joint >= kPitchUpperLimit && pitch_input > 0.0f) ||
-      (pitch_joint <= kPitchLowerLimit && pitch_input < 0.0f)) {
-    pitch_pid_->reset();
-    pitch_input = 0.0f;
+  if (pitch_joint >= kPitchUpperLimit - kPitchLimitMargin) {
+    const float hold = std::fmax(0.0f, pitch_feedforward);
+    if (pitch_input > hold) pitch_input = hold;
+  }
+  if (pitch_joint <= kPitchLowerLimit + kPitchLimitMargin) {
+    if (pitch_input < 0.0f) pitch_input = 0.0f;
   }
   using hello_world::motor::Status;
   if (yaw_motor_->setInput(yaw_input) != Status::kOk ||
