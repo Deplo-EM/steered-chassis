@@ -1,6 +1,6 @@
 // Ozone 3.26+ project: 云台 B25（yaw 4.5/0.05/0.70，pitch 11/2.0/0.70，含重力前馈与 pitch 水平补偿）。
 // ELF: Gimbal/build/dsh-gimbal-B25-harder/steered_gimbal.elf
-// SHA-256: DCB2B6FCE84A43FDBD9EE098560719D23489FA1DD3E954A88FA0B9C315BA0666
+// SHA-256: 1600A40F272BD4AB71550EACF0BB022909356E256175381D3B9DEFC2F5CF8286
 void OnProjectLoad(void) {
   Project.SetDevice("STM32F407IG");
   Project.SetHostIF("USB", "0");
@@ -19,6 +19,7 @@ void OnProjectLoad(void) {
   Watch.Add("uwTick");
   Watch.Add("g_reset_by_iwdg");
 }
+
 
 
 
