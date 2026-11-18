@@ -1,6 +1,6 @@
-// Ozone 3.26+ project: 最终版 —— 云台（pitch 下限 -0.40 / 上限 0.62）（pitch 下限 -0.40 / 上限 0.62）。
+// Ozone 3.26+ project: 最终版 —— 云台（pitch 下限 -0.40 / 上限 0.56）（pitch 下限 -0.40 / 上限 0.56）。
 // ELF: Gimbal/build/dsh-gimbal-B25-harder/steered_gimbal.elf
-// SHA-256: CA49E18F8ACB733AA25858C72C5BFF6E56E5348CFDA6F62C75FEEBB5D00FEAE8
+// SHA-256: DCB2B6FCE84A43FDBD9EE098560719D23489FA1DD3E954A88FA0B9C315BA0666
 // 特性：yaw 4.5/0.05/0.70、pitch 11/2.0/0.70、重力前馈 1.4、pitch 水平补偿。
 void OnProjectLoad(void) {
   Project.SetDevice("STM32F407IG");
@@ -20,6 +20,7 @@ void OnProjectLoad(void) {
   Watch.Add("uwTick");
   Watch.Add("g_reset_by_iwdg");
 }
+
 
 
 

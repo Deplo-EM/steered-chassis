@@ -1,6 +1,6 @@
-// Ozone 3.26+ project: 最终版 —— 底盘（pitch 下限 -0.40 / 上限 0.62）（pitch 下限 -0.40 / 上限 0.62）。
+// Ozone 3.26+ project: 最终版 —— 底盘（pitch 下限 -0.40 / 上限 0.56）（pitch 下限 -0.40 / 上限 0.56）。
 // ELF: Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf
-// SHA-256: D02AE0AF16E5E8C76D0A2B198A771A6396B1CC01FF6123761FDFEB74079295E3
+// SHA-256: 74E0CB55C848804B85EB544875E983E0A1869B8ADA510117E09EC49F15F5006E
 // 特性：A 增益（舵角 12000/2000/240）、2.0 A 舵向电流、静摩擦前馈 0.70 A、
 //       放开对齐门/堵转、跟随 Kp8/Kd1、pitch 水平补偿。
 void OnProjectLoad(void) {
@@ -22,6 +22,7 @@ void OnProjectLoad(void) {
   Watch.Add("uwTick");
   Watch.Add("g_reset_by_iwdg");
 }
+
 
 
 
