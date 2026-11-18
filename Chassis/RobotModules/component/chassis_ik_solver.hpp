@@ -54,10 +54,17 @@ inline constexpr float kDriveAlignedRad = 0.08f;
 
 /* Exported types ------------------------------------------------------------*/
 
-/** 单轮已测的舵角禁入区；半宽包括动态跟踪裕量，0 表示未配置。 */
+/** 单轮已测的舵角禁入区；半宽包括动态跟踪裕量，0 表示未配置。
+ *
+ * 坐标：车体系舵角（x 轴为 0，逆时针为正），与 steer_feedback / 命令角同一套。
+ * 用途：某些轮位在固定角度会被机械刮擦卡住，逆解遇到该区间时改走另一支，
+ *       避免让舵机一直顶住卡点。
+ * 测法：架空、分离档慢速扫舵角，target 在走而 feedback 停住的那一段就是
+ *       禁入区；中心取停住时的实测角，半宽取范围的一半。
+ * 单位：rad。 */
 struct SteerKeepout {
-  float center_rad = 0.0f;
-  float half_width_rad = 0.0f;
+  float center_rad = 0.0f;     ///< 禁入区中心（实测舵角）
+  float half_width_rad = 0.0f; ///< 半宽；0 表示该轮未配置
 };
 
 /** 整车几何参数（单位：m）。
@@ -83,16 +90,20 @@ struct Geometry {
 struct WheelCommand {
   /** 轮子线速度，单位 m/s。
    *  正负号含义：正 = 沿当前舵角指向「向前」滚；负 = 反向滚。
-   *  等效解翻转时这里会取反。 */
+   *  等效解翻转（舵角转 180°）时这里会取反，两者合起来才是同一个滚动方向。 */
   float speed = 0.0f;
 
   /** 舵角目标，单位 rad（车体系，x 轴为 0，逆时针为正）。
    *  @note 这是「连续角」，可能超出 ±π（例如累计转到 4.2 rad）。
-   *        连续的好处是：目标不会在 ±π 处跳变，PID 和速率限幅都好处理。 */
+   *        连续的好处是：目标不会在 ±π 处跳变，PID 和速率限幅都好处理；
+   *        代价是显示上会看到几十 rad 的累积值，实际跟的是折算后的方向。 */
   float angle = 0.0f;
-  /** 未限速的最终等效舵角(rad)，用于判断驱动轮实际方向是否对齐。 */
+  /** 未限速的最终等效舵角(rad)，用于判断驱动轮实际方向是否对齐：
+   *  它和 angle 的差别只在于「是否已经用 max_steer_rate 限速」。 */
   float desired_angle = 0.0f;
-  bool reanchored = false;  ///< 本拍舍弃了已不适用的旧限速起点，需清除该轮的舵角 PID 历史。
+  /** 本拍舍弃了已不适用的旧限速起点，需清除该轮的舵角 PID 历史。
+   *  典型场景：快速换向后，新目标已经贴近实测角，而旧轨迹离得很远。 */
+  bool reanchored = false;
 };
 
 /**
@@ -100,6 +111,13 @@ struct WheelCommand {
  *
  * 使用顺序：
  *   init(几何参数) → 每 1ms 调一次 solve(...) → 读 command(i) 拿结果。
+ *
+ * 一次 solve 的五个步骤（与 .cpp 里的注释对应）：
+ *   1) 云台系 → 车体系：把 (vx, vy) 按云台-车头夹角 δ 旋转；
+ *   2) 单轮速度：v_i = 平移 + ω × r_i（r_i 为轮组相对车体中心的坐标）；
+ *   3) 速度 → 舵角 atan2(vy, vx) 与轮速模长；
+ *   4) 等效支选择（直取 / 反向 180°）+ 舵角限速 + 禁入区绕行；
+ *   5) 小陀螺档保旋转：先满足 w，再用剩余轮速按比例缩放平移。
  */
 class ChassisIkSolver {
  public:
@@ -139,6 +157,10 @@ class ChassisIkSolver {
    * @param out       输出 4 个轮组的解
    * @param keep_rotation 小陀螺模式先分配旋转所需轮速，剩余轮速给同方向平移。
    * @retval None
+   *
+   * 失败处理：任一输入非有限/非正，或某轮找不到安全路径时，会重置历史并把
+   * 四个轮组的输出清零（内部 reject()），由上层决定是否停车。
+   * 调用后用 lastSolveValid() 和 keepoutBlockedMask() 判断本拍结果。
    */
   void solve(const robot::ChassisMotion& motion, float delta,
              const float steer_now[kWheelNum], float dt,

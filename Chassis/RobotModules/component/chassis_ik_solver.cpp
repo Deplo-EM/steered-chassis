@@ -119,6 +119,27 @@ float hello_world::chassis_ik_solver::ChassisIkSolver::wheelPosY(int index) cons
   }
 }
 
+/* ============================================================================
+ * 逆解主流程
+ * ---------------------------------------------------------------------------
+ * 输入：
+ *   motion        云台系速度 (vx, vy, w)，单位 m/s、m/s、rad/s。操作手推杆的
+ *                 方向是"相对枪口"的，不是相对车头的。
+ *   delta         云台相对车头的夹角 δ：从车头 +x 逆时针量到枪口 +x。
+ *   steer_now     四个舵轮的实测角（车体系，rad），用于选等效支和限速起点。
+ *   dt            控制周期（1 ms），用于 max_steer_rate * dt 的每拍步长。
+ *   keep_rotation 小陀螺档：轮速不够时优先保住旋转，平移按余量缩放。
+ *
+ * 输出（每个轮组）：
+ *   speed         有符号轮速 m/s（正 = 沿舵角正向滚）
+ *   angle         限速后的舵角目标（连续角，可超过 ±π）
+ *   desired_angle 未限速的等效目标（用于判断驱动轮是否已对齐）
+ *
+ * 不变量：
+ *   - 输出的 angle 与实测角之差每拍最多 max_steer_rate * dt；
+ *   - 任一轮找不到安全路径时，整组输出清零（reject）；
+ *   - 低速（|v| < kSpeedDeadband）时方向无意义，保持舵角、轮速给 0。
+ * ========================================================================== */
 void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
     const robot::ChassisMotion& motion, float delta,
     const float steer_now[kWheelNum], float dt, WheelCommand out[kWheelNum], bool keep_rotation)
@@ -227,6 +248,8 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
     }
 
     const float measured = steer_now != nullptr ? steer_now[i] : reference;
+    /* 禁入区（机械刮擦点）：配置后，直取/反向两支都要检查是否穿过该圆弧；
+     * 都不可达时把该轮标记为 blocked，整组归零等待，而不是硬顶卡点。 */
     const SteerKeepout& zone = geo_.steer_keepout[i];
     const bool avoid = zone.half_width_rad != 0.0f;
     const auto wheel_bit = static_cast<uint8_t>(1u << i);

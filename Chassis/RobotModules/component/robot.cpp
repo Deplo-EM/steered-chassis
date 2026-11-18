@@ -142,20 +142,24 @@ void robot::Robot::update()
     return;
   }
 
-  /* ---- 1. 更新传感器（IMU 必须每个周期都读，标定期间也要读） ----
-   * kImuFrozen跳过采样；上一有效样本超过20ms后isSampleValid撤销输出资格。
-   * 设备时钟/DRDY冻结与SPI错误由真实采样路径另行监督。 */
+  /* ---- 1. 更新传感器 ----
+   * IMU 必须每个周期都读：零漂标定需要连续样本，标定期间也不能停。
+   * 上一有效样本超过 20 ms 后 isSampleValid 会撤销输出资格（由状态机使用）。
+   * kImuFrozen 只是故障注入开关，正常构建不会触发。 */
   if (!robot::FaultActive(robot::FaultId::kImuFrozen)) {
     imu_->update();
   }
 
-  /* ---- 2. 读遥控器状态 ---- */
+  /* ---- 2. 读遥控器状态 ----
+   * 解码 DBUS、合并板间帧里的遥控分片、判断在线/急停，最终写进 remote_input_。 */
   updateInput();
 
-  /* ---- 3. 状态迁移 ---- */
+  /* ---- 3. 状态迁移 ----
+   * 根据通信/IMU/电机/对板/CAN 监督是否正常，在 Dead/Resurrection/Working 之间切换。 */
   updateStateMachine();
 
-  /* ---- 4. 生成指令并下发（急停在这条链路的最外层生效） ---- */
+  /* ---- 4. 生成指令并下发 ----
+   * 急停闸门放在 applyOutput 的最外层：只要急停有效，不管什么状态都一步不动。 */
   applyOutput();
 
   /* ---- 4.5 调试快照：状态/授权（运动量由 Chassis::update 填） ---- */
