@@ -318,11 +318,11 @@ void TestConfiguredSteerFrames() {
   for (int i=0;i<4;++i) {
     const auto request=static_cast<int16_t>((bytes[2*i]<<8)|bytes[2*i+1]);
 #if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
-    CHECK(request<=-565 && request>=-620);
+    // 收尾加强后（Kp 12000、电流上限 2.0 A）实测约 -1641。
+    CHECK(request<=-1620 && request>=-1660);
 #elif defined(ROBOT_STEER_CURRENT_FIELD) && ROBOT_STEER_CURRENT_FIELD
-    // 电机静止，目标正处于 10 rad/s 的斜坡。D 不应跟着目标加力；约 0.15 A。
-    // B01 电流档 6000 raw/rad；0.25 rad 约 1500 PID raw → 0.09 A。
-    CHECK(request<=-470 && request>=-515);
+    // 电流上限 2.0 A 后的实测值约 -819。
+    CHECK(request<=-800 && request>=-840);
 #else
     CHECK(request<=-3650 && request>=-3950);
 #endif
@@ -331,9 +331,15 @@ void TestConfiguredSteerFrames() {
   chassis.stop(); frame(bytes);
   for (uint8_t byte : bytes) CHECK(byte==0);
 #if defined(ROBOT_STEER_CURRENT_FIELD) && ROBOT_STEER_CURRENT_FIELD
+#if defined(ROBOT_COMPETITION_FINISH) && ROBOT_COMPETITION_FINISH
+  // A 增益下 45° 卡住会越过堵转门槛（实测 mask=15），锁存并撤销输出。
+  for (int i=0;i<1000;++i) { chassis.setMotion(m,0); chassis.update(dt); }
+  CHECK(chassis.steerStallMask()!=0);
+#else
   // B01 电流档较低的 P：卡在 45° 时低于大出力堵转线。只能等待对齐，不应恢复其他轮。
   for (int i=0;i<1000;++i) { chassis.setMotion(m,0); chassis.update(dt); }
   CHECK(chassis.steerStallMask()==0 && chassis.alignTimedOut());
+#endif
   for (auto* wheel : w) CHECK(wheel->getInput()==0);
   chassis.stop();
 #endif
@@ -595,3 +601,4 @@ int main() {
   std::printf("Control regression: %d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
+
