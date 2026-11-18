@@ -90,6 +90,21 @@ robot::GimbalChassisComm::GimbalChassisComm(robot::GimbalChassisComm::CodePart c
   last_rx_tick_ = hello_world::tick::GetTickMs();
 }
 
+/* ============================================================================
+ * 组一帧 8 字节发出去（方向不同，字段含义不同）
+ * ---------------------------------------------------------------------------
+ * 字节布局（两个方向共用）：
+ *   byte0    flags：alive/working/estop/dbus_online/mode/imu_ready/...
+ *            （位定义按方向不同，见函数内注释）
+ *   byte1-2  int16：底盘→云台是 yaw_rate；云台→底盘是 yaw_joint
+ *   byte3-4  int16：底盘→云台是 pitch_target；云台→底盘是 pitch_joint
+ *   byte5    保留（固定 0）
+ *   byte6    发送序号（每帧 +1，接收端用来识别丢帧/重复）
+ *   byte7    CRC8（对 byte0~6 计算，多项式 0x07，初值 0）
+ *
+ * 关键：先把整帧清零再填，保留字节固定 0，绝不把栈上随机值发出去；
+ * 若数据里出现非有限值，整帧降级为"急停"状态，防止把 working/enable 带给对板。
+ * ========================================================================== */
 void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
   /* 先整体清零：保留字节固定填 0，避免把栈上的随机值发出去 */
   for (uint8_t i = 0; i < kCommFrameLen; ++i) {
@@ -145,6 +160,14 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
   tx_data[7] = CalcCrc(tx_data);
 }
 
+/* ============================================================================
+ * 收一帧并校验
+ * ---------------------------------------------------------------------------
+ * 校验顺序：CRC8 → 字段范围/有限性 → 序号连续性。
+ * 任何一项不过：整帧丢弃，且**不刷新 last_rx_tick_**（等于没收到），
+ * 让上层按"离线超时"处理，而不是拿半帧坏数据继续跑。
+ * 通过后才更新 gimbal_data_/chassis_data_、序号和在线时间。
+ * ========================================================================== */
 bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
   /* ---- 第一步：校验 ----
    * CRC 不对就整帧丢弃，并且不刷新 last_rx_tick_（等于当成没收到）。
