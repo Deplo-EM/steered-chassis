@@ -18,3 +18,6 @@ Thumbs.db
 
 # Ozone per-user layout/session state
 debug/ozone/*.jdebug.user
+
+# 允许提交 VS Code 构建任务
+!.vscode/tasks.json
