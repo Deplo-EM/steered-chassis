@@ -1,0 +1,127 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build: both (final)",
+      "detail": "依次编译底盘与云台的最终版固件",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "build: chassis (final)",
+        "build: gimbal (final)"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "build: chassis (final)",
+      "detail": "competition-r3-steer-A-ff-free-2A（pitch 限位 v8：-0.40 / +0.50）",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "Chassis/build/competition-r3-steer-A-ff-free-2A"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "build: gimbal (final)",
+      "detail": "dsh-gimbal-B25-harder（含重力前馈与 pitch 水平补偿）",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "Gimbal/build/dsh-gimbal-B25-harder"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "configure: chassis (final)",
+      "detail": "首次或换选项后重新生成底盘构建目录",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S",
+        "Chassis",
+        "-B",
+        "Chassis/build/competition-r3-steer-A-ff-free-2A",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DROBOT_COMPETITION_FINISH=ON",
+        "-DROBOT_STEER_CURRENT_FIELD=ON",
+        "-DROBOT_STEER_FRICTION_COMP=ON",
+        "-DROBOT_ACCEPT_STUCK_STEER=ON"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "configure: gimbal (final)",
+      "detail": "首次或换选项后重新生成云台构建目录",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S",
+        "Gimbal",
+        "-B",
+        "Gimbal/build/dsh-gimbal-B25-harder",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DROBOT_PITCH_GRAVITY_FF=ON"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "test: host regression",
+      "detail": "在电脑上跑全部主机测试（不需要板子）",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "tests/run_tests.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "verify: firmware tag",
+      "detail": "检查两份最终 ELF 是否带 SAFE-BUILD 标记并打印哈希",
+      "type": "shell",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "& { $c='Chassis/build/competition-r3-steer-A-ff-free-2A/steered_chassis_competition_finish.elf'; $g='Gimbal/build/dsh-gimbal-B25-harder/steered_gimbal.elf'; foreach ($f in @($c,$g)) { if (Test-Path $f) { Write-Host $f; (Get-FileHash $f -Algorithm SHA256).Hash } else { Write-Host \"missing: $f\" } } }"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

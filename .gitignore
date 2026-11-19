@@ -12,7 +12,8 @@ Drivers/
 third_party/
 
 # ── 编辑器 / 系统杂项 ──
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 .DS_Store
 Thumbs.db
 
@@ -21,3 +22,4 @@ debug/ozone/*.jdebug.user
 
 # 允许提交 VS Code 构建任务
 !.vscode/tasks.json
+
