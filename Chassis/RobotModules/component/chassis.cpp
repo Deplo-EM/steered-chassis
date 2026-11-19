@@ -64,6 +64,10 @@ float s_cooldown_ms[4] = {};
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 绑定四组电机、独立 PID 及逆解器，并清除上次运行历史。
+ * @note  各对象由 Instance 层持有，四个数组的轮位顺序必须与逆解器一致。
+ */
 void robot::Chassis::init(hello_world::motor::Motor* wheels[kWheelNum],
                           hello_world::motor::Motor* steers[kWheelNum],
                           hello_world::pid::Pid* wheel_pids[kWheelNum],
@@ -102,6 +106,9 @@ void robot::Chassis::init(hello_world::motor::Motor* wheels[kWheelNum],
   stop();
 }
 
+/**
+ * @brief 保存下一次 update 要处理的速度、参考偏角和自旋优先选项。
+ */
 void robot::Chassis::setMotion(const ChassisMotion& motion, float delta, bool keep_rotation)
 {
   motion_ = motion;
@@ -109,6 +116,9 @@ void robot::Chassis::setMotion(const ChassisMotion& motion, float delta, bool ke
   keep_rotation_ = keep_rotation;
 }
 
+/**
+ * @brief 提供逆解结果用于诊断，未装配求解器时返回长期有效的零命令。
+ */
 const hello_world::chassis_ik_solver::WheelCommand& robot::Chassis::wheelCommand(
     int index) const
 {
@@ -164,6 +174,9 @@ void robot::Chassis::captureFeedback()
   feedback_pending_ = true;
 }
 
+/**
+ * @brief 复制发生越界的轮位和原始角度，供顶层在停止清场前保存。
+ */
 robot::diag::SteerAngleFault robot::Chassis::steerAngleFault() const
 {
   diag::SteerAngleFault fault;
@@ -232,6 +245,8 @@ void robot::Chassis::update(float dt)
       align_blocked_mask_ |= static_cast<uint8_t>(1u << i);
     }
   }
+  // 放行与重新收紧使用不同角差阈值，减小反馈在边缘抖动时的开合。
+  // 下方构建分支可能放宽整组对齐要求，诊断时应同时读取实际构建配置。
   drive_ready_ = has_drive_demand && align_blocked_mask_ == 0;
 #if defined(ROBOT_ACCEPT_STUCK_STEER) && ROBOT_ACCEPT_STUCK_STEER
   /* 地面让步（构建开关）：接受某个舵轮被机械刮擦卡住、无法对齐，
@@ -267,7 +282,7 @@ void robot::Chassis::update(float dt)
   for (int i = 0; i < kWheelNum; ++i) {
     const float steer_err = robot::WrapPi(cmd[i].angle - steer_feedback_[i]);
     steer_error[i] = steer_err;
-    // 整组到位才放行。无需求的轮清空旧积分，避免停车仍被驱动。
+    // 使用本构建的放行结果计算轮速；未放行或零需求时清掉该轮的积分。
 #if defined(ROBOT_BLOCKED_WHEEL_FALLBACK) && ROBOT_BLOCKED_WHEEL_FALLBACK
     /* 现场让步（构建开关）：某个舵轮被机械卡死、永远到不了对齐范围时，
      * 整组门会随它的误差在回差带内反复开合，造成驱动轮“一跳一跳”。
@@ -340,7 +355,7 @@ void robot::Chassis::update(float dt)
 #if defined(ROBOT_STEER_FRICTION_COMP) && ROBOT_STEER_FRICTION_COMP
     /* 台架静摩擦特调（构建开关）：误差较大且舵轴几乎不转（卡在刮蹭点）时，
      * 叠加一个固定方向的前馈，帮助越过静摩擦。
-     * 单位：kFrictionCompA 为安培，按 raw = A × 20000 / 1.2 换算。 */
+     * 单位：补偿电流按 raw = A × kPidOutputLimit / kFieldCurrentLimitA 换算。 */
     {
       constexpr float kFrictionCompA = 0.70f;
       /* 死区 0.15 rad：目标附近的小误差不触发，避免静止抖动。 */
@@ -367,6 +382,7 @@ void robot::Chassis::update(float dt)
       current[i] = 0.0f;
       steer_request_raw[i] = 0.0f;
     }
+    // 进展判据使用本轮原始请求和反馈；若锁存，先保存四轮现场，再统一清输入。
     checkSteerProgress(i, steer_feedback_[i], steer_err, steer_request_raw[i], dt);
   }
   uint8_t alignment_timeout_mask = 0;
@@ -476,8 +492,8 @@ void robot::Chassis::stop()
  * 舵向堵转判定（单轮）
  * ---------------------------------------------------------------------------
  * 三个条件同时满足才锁存：
- *   1) |角度误差| > kSteerReadyAngle（20°）；
- *   2) |输出请求| >= kStallOutputRaw（8000 raw，约 0.48 A）；
+ *   1) |角度误差| > kStallErrorRad（0.35 rad，约 20°）；
+ *   2) |输出请求| >= kStallOutputRaw（8000 raw，电流值随构建标度换算）；
  *   3) 500 ms 内角度进展 < 0.04 rad。
  * 这样"输出大但正常在转"不会被误判；锁存后由上层撤销整组输出。
  * 本函数只负责置位，不直接停车。
@@ -492,7 +508,7 @@ void robot::Chassis::checkSteerProgress(int index, float angle, float error,
   return;
 #endif
 #if defined(ROBOT_ACCEPT_STUCK_STEER) && ROBOT_ACCEPT_STUCK_STEER
-  /* 地面让步：卡住的舵轮不参与堵转锁存，避免它把整车停掉。 */
+  /* 此构建跳过全部轮位的堵转锁存；反馈合法性仍由 captureFeedback 检查。 */
   (void)index; (void)angle; (void)error; (void)request_raw; (void)dt;
   return;
 #endif
@@ -503,7 +519,9 @@ void robot::Chassis::checkSteerProgress(int index, float angle, float error,
     return;
   }
   const bool positive = request_raw > 0.0f;
+  // 只累计沿请求方向的角度进展；反向运动不能冒充克服了当前阻碍。
   const float advance = robot::WrapPi(angle - progress.angle) * (positive ? 1.0f : -1.0f);
+  // 改变出力方向或已有足够进展时重新起算，正常缓慢转向可持续刷新窗口。
   if (progress.elapsed_ms == 0.0f || positive != progress.positive ||
       advance >= kStallProgressRad) {
     progress = {angle, 0.0f, positive};

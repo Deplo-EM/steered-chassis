@@ -22,7 +22,7 @@
  *
  *  【调用方式】
  *    Imu imu;
- *    imu.init(硬件配置, 安装矩阵);   // 只调用一次，内部会阻塞几百毫秒做芯片自检
+ *    imu.init(硬件配置, 安装矩阵);   // 初始化芯片及寄存器时有阻塞等待，只在上电装配阶段调用
  *    // 之后每 1ms 调用一次：
  *    imu.update();
  *    if (imu.isCalibrated()) { ... imu.yaw() ... }
@@ -92,9 +92,9 @@ class Imu {
    * @param rot_mat_flatten  安装旋转矩阵（展平 3x3），把「传感器坐标」转成
    *                         「车体坐标（x 前 y 左 z 上）」。默认单位矩阵。
    * @param config           量程 / 输出频率等芯片配置
-   * @retval true 芯片初始化成功；false 芯片未找到或自检失败
-   * @note  内部有阻塞（芯片自检、几百毫秒），只能在 main 的初始化阶段调用，
-   *        绝对不能放进中断。
+   * @retval true 芯片初始化成功；false 参数、芯片识别或配置失败
+   * @note  芯片识别与配置包含阻塞等待，应在 main 初始化阶段调用。
+   *        零漂标定随后由周期 update 累积样本完成。
    */
   bool init(const BMI088HWConfig& hw_config,
             const float rot_mat_flatten[9] = kImuDefaultRotMat,
@@ -123,7 +123,7 @@ class Imu {
     return static_cast<float>(samples_) / static_cast<float>(kImuCalibSamples);
   }
 
-  /** 姿态角，单位 rad，相对「标定完成那一刻」的姿态 */
+  /** ZYX 欧拉角，单位 rad；yaw 参考随姿态初始化建立，roll/pitch 由重力纠偏。 */
   float roll() const { return euler_[0]; }
   float pitch() const { return euler_[1]; }
   float yaw() const { return euler_[2]; }
@@ -148,13 +148,13 @@ class Imu {
    * @brief 运行期数据是否合理
    * @note  初始化成功 ≠ 运行期一直正常：SPI 接触不良、芯片被干扰时，
    *        读回来的是一堆无意义的值（全 0、全 0xFF、NaN）。
-   *        判据：所有采样都是有限数、加速度模长在 [2, 40] m/s²
-   *        （静止时约 9.79，剧烈运动也在范围内）、角速度绝对值 < 50 rad/s。
-   *        单帧异常立即撤销 isSampleValid；连续 50 坏 / 100 好控制长期健康迟滞。
+   *        数值判据为有限数、加速度模长在 [2,40] m/s²、各轴角速度绝对值 ≤ 50 rad/s。
+   *        实际运动可能使模长越过范围，具体原因由 faultDetail 给出。
+   *        单帧判废立即撤销样本有效性，连续 50 坏/100 好样本管理长期健康。
    */
   bool isHealthy() const { return healthy_; }
 
-  /** 本次采样可用于控制；单帧异常立即 false，不等待长期健康迟滞。 */
+  /** 最新已发布样本是否仍有效；单帧判废立即 false，空 FIFO 可沿用窗口内的好样本。 */
   bool isSampleValid() const {
     return isSampleValidAt(hello_world::tick::GetTickMs());
   }
@@ -177,11 +177,13 @@ class Imu {
                     const float* gyro = nullptr, float temperature = 0.0f);
   void RecordRejected(ImuFaultKind kind, uint32_t now, const float* acc,
                       const float* gyro, float temperature);
+  /** 三条硬件通路都须有过数据且未超时；完整样本的年龄另由 isSampleValidAt 检查。 */
   bool FreshnessOk(uint32_t now) const {
     return clock_seen_ && accel_seen_ && gyro_seen_ &&
       (now-last_clock_tick_)<=kImuFreshnessMs &&
       (now-last_accel_tick_)<=kImuFreshnessMs && (now-last_gyro_tick_)<=kImuFreshnessMs;
   }
+  // seen 标记区分“从未取得数据”和“时间戳恰好为零”，避免上电时误判新鲜。
   bool clock_seen_=false, accel_seen_=false, gyro_seen_=false;
   uint32_t last_clock_=0, last_clock_tick_=0, last_accel_tick_=0, last_gyro_tick_=0, last_sample_tick_=0;
   BMI088 bmi_;                ///< 芯片驱动

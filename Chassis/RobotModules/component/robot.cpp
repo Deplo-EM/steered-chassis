@@ -71,10 +71,9 @@ constexpr float kLinearAccel = 8.0f;    ///< m/s²
 constexpr float kAngularAccel = 80.0f;  ///< rad/s²
 
 /* ---------------- 跟随模式增益 ---------------- */
-/** 角度误差 → 目标角速度的比例（1/s）。Kp=4 表示误差 1rad 时目标转速 4rad/s，
- *  仅在理想角速度跟踪下约对应0.25s时间常数；实际阻尼和稳定性须实车验证。 */
+/** 角度误差到目标角速度的比例，单位 1/s；实际命令还会经过模式限幅和角加速度斜坡。 */
 constexpr float kFollowKp = 8.0f;
-/** 符号翻转后的真阻尼；从 0.5 起试。 */
+/** 阻尼项系数；本车 gyroZ 正方向与旋转命令相反，在 generateCommand 中用加号。 */
 constexpr float kFollowKd = 1.00f;
 
 /* ---------------- 云台指令 ---------------- */
@@ -110,6 +109,10 @@ inline float Slew(float value, float target, float max_delta)
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 初始化在线检测、生命状态和遥控授权，准备首次自检。
+ * @note  对象由 Instance 层长期持有，此函数在 MainTaskInit 中调用一次。
+ */
 void robot::Robot::init()
 {
   rc_checker_.init(kRemoteOfflineMs);
@@ -175,11 +178,18 @@ void robot::Robot::update()
   updateCommData();
 }
 
+/**
+ * @brief 记录一帧合法本地 DBUS 的到达时刻，供后续在线检查。
+ */
 void robot::Robot::notifyRemoteRx()
 {
   rc_checker_.update();
 }
 
+/**
+ * @brief 接收本周期通信结果，发送故障发生时同步撤销底盘与对板授权。
+ * @note  通信任务可能在编码前报告故障，因此这里立即清理仍可被编码的运动目标。
+ */
 void robot::Robot::notifyCanTxCycle(bool success)
 {
   if (!initialized_) return;
@@ -198,6 +208,9 @@ void robot::Robot::notifyCanTxCycle(bool success)
   }
 }
 
+/**
+ * @brief 刷新对应电机的反馈时刻，槽位 0～3 为驱动、4～7 为舵向。
+ */
 void robot::Robot::notifyMotorRx(int slot)
 {
   if (slot >= 0 && slot < kMotorSlotNum) {
@@ -222,6 +235,9 @@ bool robot::Robot::areAllMotorsOnline()
   return true;
 }
 
+/**
+ * @brief 给通信层判断本拍是否可编码非零输出，停机边沿也以此值检测。
+ */
 bool robot::Robot::outputPermitted() const
 {
   if (state_ != LifeState::kWorking || estop_ || chassis_ == nullptr ||
@@ -233,6 +249,10 @@ bool robot::Robot::outputPermitted() const
 #endif
 }
 
+/**
+ * @brief 取得云台相对车头的关节偏角，归一化到一个半周范围。
+ * @note  坐标旋转使用此角，不能用云台的世界 yaw 代替。
+ */
 float robot::Robot::delta() const
 {
   if (comm_ == nullptr) {
@@ -243,6 +263,10 @@ float robot::Robot::delta() const
 
 /* Private function definitions ----------------------------------------------*/
 
+/**
+ * @brief 生成本拍一致的遥控、对板及电机反馈快照，再选择控制来源。
+ * @note  中断保护区内只复制数据，DT7 解码和死区浮点运算放在保护区外。
+ */
 void robot::Robot::updateInput()
 {
   RemoteInput local, forwarded;
@@ -254,6 +278,7 @@ void robot::Robot::updateInput()
     peer_input_ = comm_->gimbal_data();
     peer_online_ = !comm_->isOffline();
     const auto& relay = comm_->remote_relay();
+    // 状态帧和完整遥控分片都要新鲜，避免仅有在线心跳却继续使用旧摇杆。
     forwarded_online = peer_online_ && peer_input_.dbus_online &&
         relay.online(hello_world::tick::GetTickMs());
     if (forwarded_online) std::memcpy(forwarded_frame, relay.frame(), 18);
@@ -283,6 +308,7 @@ void robot::Robot::updateInput()
       selected = RemoteSource::kGimbal;
   }
 #endif
+  // 输入来源变化后，旧来源的急停确认和运动斜坡全部作废，再等待新来源确认。
   if (selected != remote_source_) {
     remote_armed_ = false; resetMotion(); gimbal_yaw_rate_ = 0.0f;
 #if defined(ROBOT_GROUND_TRIAL) && ROBOT_GROUND_TRIAL
@@ -299,6 +325,9 @@ void robot::Robot::updateInput()
     remote_armed_ = true;
 }
 
+/**
+ * @brief 把左拨杆编码转换成三种底盘模式，非法或缺省情况选择分离。
+ */
 robot::ChassisMode robot::Robot::readModeSwitch() const
 {
   if (rc_ == nullptr) {
@@ -324,12 +353,16 @@ bool robot::Robot::readEstopSwitch() const
   /* 右拨杆打到最下面 = 急停 */
   const bool local_estop =
       (remote_input_.right == hello_world::remote_control::kSwitchStateDown);
-  /* 云台板那边如果判定急停（它自己也有遥控器），也一并对本板生效 */
+  /* 在线对板的急停状态也参与本板判断，任一有效急停源都可撤销出力。 */
   const bool peer_estop =
       peer_online_ ? peer_input_.estop : false;
   return local_estop_ || local_estop || peer_estop;
 }
 
+/**
+ * @brief 汇总本拍运行条件，推进 Dead、自检、Working，恢复过程要求条件连续成立。
+ * @note  生命状态表示就绪程度，操作者急停由 applyOutput 外层另行关断。
+ */
 void robot::Robot::updateStateMachine()
 {
   const bool remote_ok = remote_input_.online;
@@ -389,6 +422,9 @@ void robot::Robot::updateStateMachine()
   }
 }
 
+/**
+ * @brief 将同时失效的条件编码为原因位图，供状态迁移和历史诊断共用。
+ */
 uint8_t robot::Robot::deadCauses(bool imu_ok, bool motors_ok, bool peer_ok) const
 {
   uint8_t causes = kDeadNone;
@@ -402,11 +438,17 @@ uint8_t robot::Robot::deadCauses(bool imu_ok, bool motors_ok, bool peer_ok) cons
   return causes;
 }
 
+/**
+ * @brief 使用已过连续死区的平移通道判断回中，供分离模式保存减速参考方向。
+ */
 bool robot::Robot::leftCentered() const
 {
   return remote_input_.online && remote_input_.lv == 0.0f && remote_input_.lh == 0.0f;
 }
 
+/**
+ * @brief 清空速度斜坡及其坐标参考，防止旧速度在再次授权后释放。
+ */
 void robot::Robot::resetMotion()
 {
   ramped_.reset();
@@ -414,6 +456,10 @@ void robot::Robot::resetMotion()
   steering_ref_held_ = false;
 }
 
+/**
+ * @brief 统一执行状态迁移动作，先保存故障现场，再清目标和出力授权。
+ * @note  同态调用直接返回，保留首次进入该状态的时间戳。
+ */
 void robot::Robot::enterState(LifeState next, uint32_t now, uint8_t dead_causes)
 {
   if (next == state_) {
@@ -447,12 +493,14 @@ void robot::Robot::enterState(LifeState next, uint32_t now, uint8_t dead_causes)
   }
 }
 
+/**
+ * @brief 恢复时以当前俯仰关节角接续目标，再安排自动抬平。
+ */
 void robot::Robot::initWorkingTargets()
 {
   resetMotion();
 
-  /* 进入 Working：先接当前角度（无扰），再由斜坡把 pitch 抬平到 0。
-   * 抬平偶发触发云台 controlValid 失效，已加 dead_reason 位 64 观测。 */
+  /* 用实测角接续以避免目标突跳；回到水平的速度由 updateGimbalCommand 控制。 */
   gimbal_pitch_target_ = (comm_ != nullptr) ? peer_input_.pitch_joint
                                             : 0.0f;
   pitch_level_pending_ = true;
@@ -587,6 +635,10 @@ void robot::Robot::generateCommand()
   updateGimbalCommand();
 }
 
+/**
+ * @brief 把右杆转换成 yaw 角速度和 pitch 关节角目标。
+ * @note  yaw 的积分由持有世界姿态的云台板完成，pitch 在本板按周期积分并限行程。
+ */
 void robot::Robot::updateGimbalCommand()
 {
   if (!remote_input_.online) {
@@ -659,11 +711,7 @@ void robot::Robot::applyOutput()
   }
 
   if (state_ != LifeState::kWorking) {
-    /* 审计 H3 修复：考核红线是「生命状态未进入 Working 时，所有电机必须
-     * 立刻输出归零」。所以这里一律 stop()，不再做「恢复自检阶段舵轮回中」。
-     * 回中虽然好看，但它是「无人下达的运动指令」，按红线判会不通过。
-     * 需要这个功能的话，必须在考核方书面确认后，再做成「受遥控器确认、
-     * 限速、且急停可打断」的流程。 */
+    /* 自检期间保持零输入，等进入 Working 后才处理操作者的运动目标。 */
     chassis_->stop();
     return;
   }
@@ -707,6 +755,10 @@ void robot::Robot::applyGroundOutput()
 }
 #endif
 
+/**
+ * @brief 发布状态机结果及云台目标，通信任务稍后统一编码发送。
+ * @note  停止授权时立即把 yaw 角速度置零，pitch 仍保留用于恢复对齐的目标。
+ */
 void robot::Robot::updateCommData()
 {
   if (comm_ == nullptr) {

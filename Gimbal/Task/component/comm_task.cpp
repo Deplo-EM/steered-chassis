@@ -87,9 +87,11 @@ void StartDbusReceive()
   robot::CriticalSection lock;
   if (!s_dbus_restart_pending) return;
   if (HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf, sizeof(s_dbus_buf)) == HAL_OK) {
+    // 36 字节缓冲的半满恰好是 18 字节，但它不能代替一帧结束的空闲边界。
     __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
     s_dbus_restart_pending = false;
   } else {
+    // 启动失败时保留 pending，由后续 CommTask 重试，避免一次错误永久关闭遥控。
     s_dbus_rx_start_failures = s_dbus_rx_start_failures + 1u;
   }
 }
@@ -103,6 +105,9 @@ uint8_t s_yaw_frame[8];
 uint8_t s_pitch_frame[8];
 uint8_t s_comm_frame[8];
 
+/**
+ * @brief 在短临界区内读取电机输入并编码，避免与接收侧更新发生交错。
+ */
 bool EncodeMotor(hello_world::motor::Motor* motor, uint8_t* frame)
 {
   robot::CriticalSection lock;
@@ -117,6 +122,8 @@ bool SendDamiaoFrame(CAN_HandleTypeDef* bus, hello_world::motor::Motor* motor, u
     return false;
   }
   using hello_world::motor::DaMiao;
+  // 未获许可时反复送失能；获得许可但驱动尚未确认使能时送使能命令，
+  // 只有握手完成后才编码正常力矩帧。
   if (!allowed || enable_requested) {
     // 失能必须是驱动命令，不能用「MIT 力矩填 0」代替。
     for (uint8_t i = 0; i < 7; ++i) frame[i] = 0xFFu;
@@ -165,6 +172,9 @@ bool CancelOnStop(robot::Robot* controller)
 
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 启动两路 CAN 接收与 USART3 空闲 DMA 接收，实际喂狗留在周期通信末尾。
+ */
 void CommTaskInit(void)
 {
   /* ---------- 1. CAN 滤波器 + 启动 ---------- */
@@ -181,6 +191,10 @@ void CommTaskInit(void)
   StartDbusReceive();
 }
 
+/**
+ * @brief 监督上一批发送结果，提交两轴帧、转发遥控分片并发布本板状态。
+ * @note  急停/失联等关键状态优先提交，普通状态可重试，末尾再汇总结果决定喂狗。
+ */
 void CommTask(void)
 {
   StartDbusReceive();
@@ -204,6 +218,7 @@ void CommTask(void)
       (void)CAN_Send_Msg(&hcan2, dummy, 0x7F1u, 8);
     }
   }
+  // 电机每两拍发送一次；未发送的那一拍沿用上次提交结果，不凭空覆盖一次失败。
   static bool last_motor_submit_ok = true;
   if (motor_due) {
     bool motor_cycle_ok = true;
@@ -214,6 +229,7 @@ void CommTask(void)
       ++s_can_tx_fail_count;
       motor_cycle_ok = false;
     }
+    // 同拍 yaw 提交失败后，pitch 改送失能，避免继续扩展本拍的正常出力。
     const bool pitch_allowed = motor_allowed && motor_cycle_ok;
     if (!SendDamiaoFrame(robot::wiring::Can(robot::wiring::kGimbalPitch), GetMotorPitch(), s_pitch_frame,
                          pitch_allowed, pitch_allowed && controller->motorEnableRequested(1))) {
@@ -229,6 +245,7 @@ void CommTask(void)
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   if (comm == nullptr) cycle_ok = false;
   static bool retry_status = false;
+  // 以下 status 仅作本地变化检测，其位布局与协议 encode 的 flags 字节不同。
   static uint8_t last_queued_status = 0;
   const auto* state = comm != nullptr ? &comm->gimbal_data() : nullptr;
   const uint8_t status = state == nullptr ? 0u : uint8_t(state->working | (state->estop<<1) |
@@ -257,6 +274,7 @@ void CommTask(void)
     robot::CriticalSection lock;
     relay_pending = comm->remote_relay().peekTx(hello_world::tick::GetTickMs(), relay_id, relay_frame);
   }
+  // 只有当前片真正入邮箱后才推进片号；UART 新帧只更新待发布缓存。
   if (relay_pending) {
     if (CAN_Send_Msg(robot::wiring::Can(robot::wiring::kGimbalPeer), relay_frame, relay_id, 8)) {
       robot::CriticalSection lock;
@@ -270,7 +288,9 @@ void CommTask(void)
 
   /* ---------- 3. 看门狗：整个周期都跑完了才喂 ----------
    * 全板**只有这一个**喂狗调用点。 */
+  // 本拍硬件轮询失败已在编码前报告；其余失败在末尾汇总，避免同一拍重复累计。
   if(controller && !failure_reported) controller->notifyCanTxCycle(cycle_ok);
+  // 汇总失败可能刚撤销了授权，因此再检查停机边沿，及时撤销尚在邮箱中的旧帧。
   if(!CancelOnStop(controller) && controller && !failure_reported && cycle_ok)
     controller->notifyCanTxCycle(false);
   // 连续 10 ms 失败停止喂狗；恢复前仅尝试零输出。HAL_OK 不等于送达。
@@ -284,13 +304,14 @@ void CommTask(void)
 /* Private function definitions ----------------------------------------------*/
 
 /**
- * @brief UART 空闲中断回调：DBUS 一帧收完时进入
- * @note  必须 extern "C"，否则中断向量表找不到这个符号。
+ * @brief 处理 USART3 DMA 接收事件，仅将长度为 18 字节的合法数据提交给遥控器。
+ * @note  extern "C" 与 HAL 的 C 链接回调名保持一致，该函数由 HAL 的 IRQ 流程调用。
  *        这里**不喂狗**，只记录「收到了一帧合法数据」。
  */
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
+  // 其他串口和半满事件各自处理；半满时继续接收，不能在这里抢先重启 DMA。
   if (huart != &huart3 || HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT) return;
   if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
     /* ---------- 故障注入：把拨轮两个字节改成 0xFC00 ----------

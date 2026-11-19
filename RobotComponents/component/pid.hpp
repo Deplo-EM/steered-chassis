@@ -52,7 +52,7 @@ class Pid {
    * @param ki 积分系数
    * @param kd 微分系数
    * @param out_lim 输出限幅（对称，±out_lim）
-   * @param i_lim 积分项单独限幅（对称，防止积分无限累积）
+   * @param i_lim 累计误差 integral_ 的对称限幅，积分对输出的最大贡献为 |ki*i_lim|。
    */
   Pid(float kp, float ki, float kd, float out_lim, float i_lim)
       : kp_(kp), ki_(ki), kd_(kd), out_lim_(out_lim), i_lim_(i_lim)
@@ -129,6 +129,7 @@ class Pid {
       reset();
       return 0.0f;
     }
+    // 控制器名义上限和当前执行器上限取较小值，前馈也占用这份输出余量。
     const float limit = out_lim_ < actuator_limit ? out_lim_ : actuator_limit;
 
     /* 低通系数越小越平滑，但相位滞后越大。复位后首帧仍只算 P/I。 */
@@ -136,6 +137,7 @@ class Pid {
     if (!first_run_) {
       d_raw = use_measured_rate ? -measured_rate : (error - last_error_) / dt;
     }
+    // D 使用负实测速率时，目标跳变不会直接产生微分尖峰；两种入口都保留滤波历史。
     d_filtered_ += d_lpf_ * (d_raw - d_filtered_);
 
     /* ---- 积分项：先累加，再限幅 ---- */

@@ -38,6 +38,9 @@ constexpr float kPitchLimitMargin = 0.02f;
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 绑定两轴电机和位置环，清空授权前的反馈与控制有效标记。
+ */
 void robot::Gimbal::init(hello_world::motor::Motor* yaw_motor,
                          hello_world::motor::Motor* pitch_motor,
                          hello_world::pid::Pid* yaw_pid,
@@ -57,6 +60,9 @@ void robot::Gimbal::init(hello_world::motor::Motor* yaw_motor,
   feedback_finite_ = control_valid_ = false;
 }
 
+/**
+ * @brief 接纳关节目标并限软件行程，无效数保留到 update 统一拒绝。
+ */
 void robot::Gimbal::setPitchTarget(float pitch_joint)
 {
   if (!std::isfinite(pitch_joint)) {
@@ -73,6 +79,10 @@ void robot::Gimbal::setPitchTarget(float pitch_joint)
       (pitch_joint <= kPitchLowerLimit + kPitchLimitMargin);
 }
 
+/**
+ * @brief 一次取得关节角、俯仰速度和驱动健康状态，供本拍闭环共用。
+ * @note  feedback_pending_ 表示已采过快照，update 消费后清除，避免同拍读两份反馈。
+ */
 void robot::Gimbal::captureFeedback()
 {
   CriticalSection lock;
@@ -149,9 +159,9 @@ void robot::Gimbal::update(float dt, float yaw_world_meas, float yaw_world_rate)
     stop();
     return;
   }
-  /* 到限位附近：压住 P 的“向外顶”分量，但保留重力前馈——
-   * 这样炮管既不会顶着止点抖，也不会因为出力清零而掉下来。
-   * 不再每周期 reset：那会形成 1 kHz 方波，正是之前狂抖的来源。 */
+  /* 实测角接近边界时，进一步裁剪 PID 与前馈合成后的向外力矩。
+   * 上边界最多保留非负重力支撑，下边界挡住继续向下的负力矩。
+   * 保留 PID 历史，向内回收的力矩仍可通过。 */
   pitch_at_limit_ = pitch_target_ >= kPitchUpperLimit - kPitchLimitMargin ||
                     pitch_target_ <= kPitchLowerLimit + kPitchLimitMargin ||
                     pitch_joint >= kPitchUpperLimit - kPitchLimitMargin ||
@@ -175,6 +185,10 @@ void robot::Gimbal::update(float dt, float yaw_world_meas, float yaw_world_rate)
   updateDebug();
 }
 
+/**
+ * @brief 发布目标、反馈及 PID 内部输出，供 Ozone 对照控制过程。
+ * @note  pitch_output 取 PID 的合成限幅值，边界处还会进一步裁剪，可能与最终下发值不同。
+ */
 void robot::Gimbal::updateDebug()
 {
   auto& d = diag::g_gimbal_dbg;
@@ -189,6 +203,10 @@ void robot::Gimbal::updateDebug()
   d.yaw_integral = yaw_pid_ ? yaw_pid_->integral() : 0.0f;
 }
 
+/**
+ * @brief 将两轴软件输入归零并清反馈控制历史，阻止旧积分继续驱动。
+ * @note  总线上的失能帧由上层撤销许可后交给 CommTask 发送。
+ */
 void robot::Gimbal::stop()
 {
   control_valid_ = false;
@@ -207,12 +225,18 @@ void robot::Gimbal::stop()
   updateDebug();
 }
 
+/**
+ * @brief 清两轴积分及微分历史，保留已取得的反馈快照用于无扰接续。
+ */
 void robot::Gimbal::resetControllers()
 {
   if (yaw_pid_ != nullptr) yaw_pid_->reset();
   if (pitch_pid_ != nullptr) pitch_pid_->reset();
 }
 
+/**
+ * @brief 返回云台相对车头的偏角，优先使用本拍快照，周期归一化到 ±π。
+ */
 float robot::Gimbal::yawJoint() const
 {
   if (yaw_motor_ == nullptr) {
@@ -224,6 +248,9 @@ float robot::Gimbal::yawJoint() const
   return robot::WrapPi(yaw_motor_->angle() - kYawJointOffset);
 }
 
+/**
+ * @brief 返回俯仰关节角，优先使用同拍快照，保留有限行程内的线性角差。
+ */
 float robot::Gimbal::pitchJoint() const
 {
   if (pitch_motor_ == nullptr) {

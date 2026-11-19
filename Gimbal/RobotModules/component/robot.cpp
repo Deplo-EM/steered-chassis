@@ -49,6 +49,10 @@ constexpr uint32_t kMotorOfflineMs = 100;
 constexpr uint32_t kResurrectionMs = 500;
 
 #if !defined(ROBOT_GROUND_GIMBAL_LOCK) || !ROBOT_GROUND_GIMBAL_LOCK
+/**
+ * @brief 将身体系角速度换成世界 yaw 的变化率，单位 rad/s。
+ * @note  该速率与世界角误差配对进入 D 项，直接使用关节速度会混入底盘运动。
+ */
 float WorldYawRate(const hello_world::imu::Imu& imu)
 {
   const float roll = imu.roll(), pitch = imu.pitch();
@@ -71,6 +75,9 @@ float WorldYawRate(const hello_world::imu::Imu& imu)
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 初始化两轴自检与授权记录，上电后先等待正常反馈和操作者急停确认。
+ */
 void robot::Robot::init()
 {
   rc_checker_.init(kRemoteOfflineMs);
@@ -139,11 +146,17 @@ void robot::Robot::update()
   updateCommData();
 }
 
+/**
+ * @brief 刷新合法本地遥控帧的到达时间，供急停及在线判断使用。
+ */
 void robot::Robot::notifyRemoteRx()
 {
   rc_checker_.update();
 }
 
+/**
+ * @brief 汇总本周期 CAN 结果，故障时清力矩、使能许可并同步对板状态。
+ */
 void robot::Robot::notifyCanTxCycle(bool success)
 {
   if (!initialized_) return;
@@ -157,6 +170,9 @@ void robot::Robot::notifyCanTxCycle(bool success)
   }
 }
 
+/**
+ * @brief 记录对应关节的有效反馈，两个槽位分别对应 yaw 和 pitch。
+ */
 void robot::Robot::notifyMotorRx(int slot)
 {
   if (slot >= 0 && slot < kMotorSlotNum) {
@@ -183,6 +199,9 @@ bool robot::Robot::areAllMotorsOnline()
 
 /* Private function definitions ----------------------------------------------*/
 
+/**
+ * @brief 同一临界区取得遥控、底盘指令及两轴状态，保证本拍授权使用同一份快照。
+ */
 void robot::Robot::updateInput()
 {
   {
@@ -208,6 +227,10 @@ void robot::Robot::updateInput()
   estop_ = local_estop || peer_estop;
 }
 
+/**
+ * @brief 用对板在线、本板 IMU 与驱动反馈决定能否自检和保持 Working。
+ * @note  自检允许正常失能反馈，真正输出再等待底盘许可和两轴使能确认，避免两板互相等待。
+ */
 void robot::Robot::updateStateMachine()
 {
   const bool comm_ok = peer_online_;
@@ -217,6 +240,7 @@ void robot::Robot::updateStateMachine()
   const bool imu_ok = imu_control_state_ != ImuControlState::kUnavailable;
   // 正常失能仍有反馈，允许双板自检。已经在出力时意外失能必须撤销授权。
   const bool motors_ok = motors_online_ && drive_feedback_.fault_free && gimbal_->feedbackFinite();
+  // 已出力后掉使能与初次等待使能分别判断；后者给驱动一个有上限的握手时间。
   const bool lost_enable = output_enabled_prev_ && !estop_ && !gimbal_->feedbackHealthy();
   const bool arm_timeout = drive_permitted_ && !output_enabled_prev_ && !estop_ &&
                            !gimbal_->feedbackHealthy() && now - arm_started_tick_ >= kMotorOfflineMs;
@@ -262,6 +286,9 @@ void robot::Robot::updateStateMachine()
   }
 }
 
+/**
+ * @brief 统一记录迁移时刻与最近故障，离开 Working 时撤销输出。
+ */
 void robot::Robot::enterState(LifeState next)
 {
   if (next == state_) {
@@ -282,12 +309,20 @@ void robot::Robot::enterState(LifeState next)
   }
 }
 
+/**
+ * @brief 接受本地有效急停档，或在线底盘转达的有效遥控急停确认。
+ * @note  离线缓存中的急停位不能用于恢复授权。
+ */
 bool robot::Robot::operatorEstopConfirmed() const
 {
   return (remote_input_.online && remote_input_.right == hello_world::remote_control::kSwitchStateDown) ||
          (peer_online_ && peer_input_.alive && peer_input_.dbus_online && peer_input_.estop);
 }
 
+/**
+ * @brief 清闭环积分和前馈并撤销使能许可，通信任务据此发送两轴失能帧。
+ * @note  再次允许出力前重新核对驱动失能反馈，防止把上一次确认带入下一次恢复。
+ */
 void robot::Robot::stopOutputs()
 {
   if (drive_permitted_) disabled_feedback_seen_ = false;
@@ -332,6 +367,7 @@ void robot::Robot::applyOutput(float dt)
     return;
   }
 
+  // 先完成“确认失能→请求使能→反馈使能”的握手，之后才开始目标积分和位置闭环。
   if (!drive_permitted_) arm_started_tick_ = hello_world::tick::GetTickMs();
   drive_permitted_ = true;
   /* 允许通信任务尝试使能；两轴尚未确认使能时，闭环仍不运行。 */
@@ -360,10 +396,9 @@ void robot::Robot::applyOutput(float dt)
   yaw_target_world_ = robot::WrapPi(yaw_target_world_ + yaw_rate * dt);
   gimbal_->setYawWorldTarget(yaw_target_world_);
 
-  /* ---------- pitch：底盘下发的关节角目标，减去车体俯仰做世界水平补偿 ----------
-   * 直行加减速时悬挂让车体俯仰，若只控关节角，炮管会跟着后仰/前倾。
-   * IMU 装在云台底座，其 pitch 就是车体俯仰；关节目标减去它即可保持水平。
-   * 若实车方向相反（越补越仰），把这里的减号翻成加号。 */
+  /* ---------- pitch：用本板俯仰读数修正底盘下发的目标 ----------
+   * 本式先作姿态补偿，再由 setPitchTarget 约束到软件关节行程内。
+   * IMU 的安装坐标、关节正方向和补偿符号需要配套核对。 */
   gimbal_->setPitchTarget(command.pitch_target - imu_->pitch());
 
   /* ---------- 闭环 ---------- */
@@ -376,6 +411,9 @@ void robot::Robot::applyOutput(float dt)
 #endif
 }
 
+/**
+ * @brief 发布本板就绪状态与关节反馈，供底盘做三模式方向变换和授权判断。
+ */
 void robot::Robot::updateCommData()
 {
   if (comm_ == nullptr) {

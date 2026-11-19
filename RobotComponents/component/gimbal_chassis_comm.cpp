@@ -31,9 +31,8 @@ constexpr float kAngleScale = 10000.0f;
 /** yaw 角速度缩放：1 LSB = 0.001 rad/s，int16 可表示 ±32.767 rad/s */
 constexpr float kYawRateScale = 1000.0f;
 
-/** 浮点 → int16，带范围保护。
- *  注意下界取 -32767 而不是 -32768：避免 +32767 与 -32768 不对称，
- *  也避免 lroundf 溢出到实现未定义的行为。 */
+/** 浮点物理量乘缩放系数后量化，使用对称区间 [-32767,32767]。
+ *  先夹紧再四舍五入，保证整数能放入协议的 int16 字段。 */
 inline int16_t FloatToInt16(float value, float scale)
 {
   if (!std::isfinite(value)) return 0;
@@ -46,7 +45,7 @@ inline int16_t FloatToInt16(float value, float scale)
   return static_cast<int16_t>(std::lroundf(scaled));
 }
 
-/** int16 → 浮点（与 FloatToInt16 互为逆运算） */
+/** 将量化整数还原为物理量；量化和限幅会损失精度，不能恢复全部原始小数。 */
 inline float Int16ToFloat(int16_t value, float scale)
 {
   return static_cast<float>(value) / scale;
@@ -82,6 +81,7 @@ inline uint8_t CalcCrc(const uint8_t* data)
 /* External variables --------------------------------------------------------*/
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
+/** 只确定角色与收发 ID；received_ 保持初始假值，构造时刻不能充当有效接收。 */
 robot::GimbalChassisComm::GimbalChassisComm(robot::GimbalChassisComm::CodePart code_part,
                                             uint32_t tx_id, uint32_t rx_id) {
   code_part_ = code_part;
@@ -163,7 +163,7 @@ void robot::GimbalChassisComm::encode(uint8_t tx_data[8]) {
 /* ============================================================================
  * 收一帧并校验
  * ---------------------------------------------------------------------------
- * 校验顺序：CRC8 → 字段范围/有限性 → 序号连续性。
+ * 校验顺序为 CRC8、保留位/模式合法性、序号新鲜度，再还原整数物理量。
  * 任何一项不过：整帧丢弃，且**不刷新 last_rx_tick_**（等于没收到），
  * 让上层按"离线超时"处理，而不是拿半帧坏数据继续跑。
  * 通过后才更新 gimbal_data_/chassis_data_、序号和在线时间。
@@ -194,6 +194,7 @@ bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
 
   const uint32_t now = hello_world::tick::GetTickMs();
   const uint8_t seq = rx_data[6];
+  // 按 8 位模数做差，255→0 得到 1；半周及以上的差值按落后序号处理。
   const uint8_t advance = static_cast<uint8_t>(seq - rx_seq_);
   if (received_ && (advance == 0u || advance >= 128u)) {
     // 同序号永不保活。离线后的逆序可能是对方重启：先暂存，再等递增帧确认。
@@ -211,6 +212,7 @@ bool robot::GimbalChassisComm::decode(const uint8_t rx_data[8]) {
       return false;
     }
   }
+  // 到此确认是可接纳的新帧，才提交序号和各字段，坏帧不会部分覆盖状态。
   resync_pending_ = false;
   rx_seq_ = seq;
 

@@ -10,6 +10,11 @@
 #include "basic_mode.hpp"
 
 namespace robot {
+/**
+ * @brief 汇总通信任务的成功/失败，并分别管理出力故障和喂狗资格。
+ * @note  一次失败即锁存故障；持续失败达到阈值才撤销喂狗。
+ *        通信恢复后仍须保持有效急停确认，才能解除故障锁存。
+ */
 class CanTxGuard {
  public:
   static constexpr uint32_t kStopFeedingAfterMs = 10u;
@@ -21,17 +26,20 @@ class CanTxGuard {
       ++failed_cycles_;
       faulted_ = true;
       recovering_ = false;
+      // 只在连续失败段的起点记时；反复失败不能把计时起点不断后移。
       if (!failing_) bad_since_ = now;
       failing_ = true;
       watchdog_allowed_ = (now - bad_since_) < kStopFeedingAfterMs;
       return;
     }
+    // 一次成功结束连续失败段，恢复喂狗资格；出力故障另走下方确认流程。
     failing_ = false;
     watchdog_allowed_ = true;
     if (!faulted_ || !reset_ack) {
       recovering_ = false;
       return;
     }
+    // 仅成功且急停确认持续成立时累计恢复时间；中途任一条件丢失便重计。
     if (!recovering_) good_since_ = now;
     recovering_ = true;
     if ((now - good_since_) >= kRecoveryMs) {
@@ -40,6 +48,7 @@ class CanTxGuard {
     }
   }
 
+  /** 返回锁存是否解除；与 canFeedWatchdog 的延时策略分别使用。 */
   bool healthy() const { return !faulted_; }
   bool canFeedWatchdog() const { return watchdog_allowed_; }
   uint32_t failedCycles() const { return failed_cycles_; }
@@ -49,7 +58,7 @@ class CanTxGuard {
   bool failing_ = false;
   bool recovering_ = false;
   bool watchdog_allowed_ = true;
-  uint32_t bad_since_ = 0, good_since_ = 0, failed_cycles_ = 0;
+  uint32_t bad_since_ = 0, good_since_ = 0, failed_cycles_ = 0;  ///< 两段起点均为 ms，失败数为累计周期数。
 };
 }  // namespace robot
 #endif

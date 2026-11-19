@@ -64,6 +64,9 @@ bool SteerArcClear(float center, float half_width, float travel)
 /* Private function prototypes -----------------------------------------------*/
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 保存几何和速度约束，轮位坐标以底盘中心为原点。
+ */
 void hello_world::chassis_ik_solver::ChassisIkSolver::init(
     const Geometry& geo, float max_steer_rate, float max_wheel_speed,
     float steer_flip_margin)
@@ -75,6 +78,10 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::init(
   reset(nullptr);
 }
 
+/**
+ * @brief 清空上一拍舵角和等效解分支，重新选择连续轨迹的起点。
+ * @note  传入实测角时以它为初始参考，未传入时由后续 solve 的反馈决定。
+ */
 void hello_world::chassis_ik_solver::ChassisIkSolver::reset(
     const float steer_now[kWheelNum])
 {
@@ -190,6 +197,8 @@ void hello_world::chassis_ik_solver::ChassisIkSolver::solve(
   float vx_c = motion.vx * cos_d - motion.vy * sin_d;
   float vy_c = motion.vx * sin_d + motion.vy * cos_d;
   float w = motion.w;
+  // 小陀螺先给自旋分量分配轮速余量，再缩减平移的模长，保留平移方向。
+  // 逐轮检查叠加速度，避免平移一加上去就把自旋等比例压得几乎消失。
   if (keep_rotation) {
     const float module_radius = std::hypot(geo_.half_length, geo_.half_width);
     const float translation = std::hypot(vx_c, vy_c);

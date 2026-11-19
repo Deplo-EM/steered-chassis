@@ -19,6 +19,10 @@
 
 /* Exported function definitions ---------------------------------------------*/
 
+/**
+ * @brief 连接 BMI088 硬件并选定解算采样率，初始化成功后开始零漂标定。
+ * @note  陀螺 ODR 决定每个 FIFO 样本的积分步长，TIM6 只决定何时来取一批样本。
+ */
 bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
                                  const float rot_mat_flatten[9],
                                  const BMI088Config& config)
@@ -46,6 +50,10 @@ bool hello_world::imu::Imu::init(const BMI088HWConfig& hw_config,
   return true;
 }
 
+/**
+ * @brief 作废当前零偏、姿态及新鲜度标记，重新积累标定和健康恢复样本。
+ * @note  累计拒绝计数与最近坏样本留给诊断，重新标定不抹掉历史故障证据。
+ */
 void hello_world::imu::Imu::restartCalibration()
 {
   calibrated_ = false;
@@ -64,6 +72,10 @@ void hello_world::imu::Imu::restartCalibration()
   ahrs_.init(gyro_sample_freq_, kImuMahonyKp, kImuMahonyKi);
 }
 
+/**
+ * @brief 读取一批传感器数据，先检查时序和整批数值，再依次标定或融合。
+ * @note  加速度和陀螺采样率可不同，合格加速度可在新鲜度窗口内配对多个陀螺样本。
+ */
 void hello_world::imu::Imu::update()
 {
   if (!inited_) {
@@ -87,6 +99,7 @@ void hello_world::imu::Imu::update()
   if (!clock_seen_) {
     clock_seen_=true; last_clock_=info.sensor_time; last_clock_tick_=now;
   } else {
+    // 芯片时钟为 24 位，用模 2^24 差值处理正常回绕；半周以上按回退处理。
     const uint32_t advance=(info.sensor_time-last_clock_)&0xFFFFFFu;
     if (advance>=0x800000u) {
       // 时钟回退/设备重启：原偏置与姿态不再可信，重新标定后再授权。
@@ -103,6 +116,7 @@ void hello_world::imu::Imu::update()
     RejectSample(ImuFaultKind::kGyroFifo, now);
     return;
   }
+  // 这两类时间戳表示硬件通路出现新数据；完整样本通过后另更新 last_sample_tick_。
   if (info.gyro_count != 0u) { gyro_seen_=true; last_gyro_tick_=now; }
   if (info.accel_ready) {
     accel_seen_ = true;
@@ -117,6 +131,7 @@ void hello_world::imu::Imu::update()
                    info.gyro_count != 0u ? info.gyro_batch[0] : no_gyro, sample_temperature);
       return;
     }
+    // 仅通过数值校验的加速度可成为后续陀螺积分使用的参考方向。
     for (int i = 0; i < 3; ++i) accel_cache_[i] = sample_acc[i];
     accel_cache_valid_ = true;
   }
@@ -143,11 +158,17 @@ void hello_world::imu::Imu::update()
       return;
     }
   }
+  // 同批陀螺按采集顺序逐样本积分，避免丢掉两次任务之间积累的真实转动。
+  // 若解算中途失败并重置标定，停止消费这一批剩余样本。
   for (uint8_t i = 0; i < info.gyro_count; ++i) {
     if (!ApplySample(accel_cache_, info.gyro_batch[i], sample_temperature, now)) break;
   }
 }
 
+/**
+ * @brief 消费一份已检查数值的样本，更新健康计数并执行零漂标定或 Mahony 融合。
+ * @note  返回 true 表示本样本处理完成，能否出力还取决于标定、健康和时效条件。
+ */
 bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float sample_gyro[3],
                                       float sample_temperature, uint32_t now)
 {
@@ -172,8 +193,8 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
 
   /* ---------- 2. 零漂标定 ---------- */
   if (!calibrated_) {
-    /* 先判断「是否静止」：与当前均值偏差过大 → 车在动，重新采样。
-     * 这样即使上电时有人碰了车，也会自动重来，而不是把运动数据当成偏置。 */
+    /* 用三轴角速度相对累计均值的偏差检查采样是否稳定，超阈值便重新累加。
+     * 稳定匀速旋转也可能通过此判据，因此上电标定仍需让传感器真正静置。 */
     if (samples_ > 100u) {
       const float inv = 1.0f / static_cast<float>(samples_);
       for (int i = 0; i < 3; ++i) {
@@ -193,12 +214,13 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
 
     if (samples_ >= kImuCalibSamples) {
       const float inv = 1.0f / static_cast<float>(samples_);
+      // 静置时三轴均值估计陀螺零偏，后续每个样本先减去它再积分。
       gyro_bias_[0] = gyro_sum_[0] * inv;
       gyro_bias_[1] = gyro_sum_[1] * inv;
       gyro_bias_[2] = gyro_sum_[2] * inv;
       calibrated_ = true;
-      /* 标定完成这一刻就是姿态零点，Mahony 从单位四元数重新开始，
-       * 加速度计会在随后几百毫秒内把 roll / pitch 收敛到正确值。 */
+      /* 从单位四元数建立新的姿态参考；随后用重力方向纠正 roll/pitch，
+       * 收敛速度取决于增益和初始姿态，yaw 继续依赖零偏修正后的陀螺积分。 */
       ahrs_.init(gyro_sample_freq_, kImuMahonyKp, kImuMahonyKi);
     } else {
       /* 标定未完成：输出保持 0，绝不对外提供「看起来像真值」的角度 */
@@ -214,6 +236,7 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
 
   /* ---------- 4. 姿态解算 ---------- */
   ahrs_.update(acc_, gyro_bias_removed_);
+  // 先在候选数组中检查解算结果，全部为有限数后才替换对外姿态。
   float candidate_euler[3];
   ahrs_.getEulerAngle(candidate_euler);
   for (float angle : candidate_euler) {
@@ -228,6 +251,10 @@ bool hello_world::imu::Imu::ApplySample(const float sample_acc[3], const float s
   return true;
 }
 
+/**
+ * @brief 生成指定时刻的故障快照，当前可用性与最近被拒样本分别记录。
+ * @note  各通路年龄使用同一个 now，顶层保存停机现场时可直接复制这份结果。
+ */
 hello_world::imu::ImuFaultDetail hello_world::imu::Imu::faultDetail(uint32_t now) const
 {
   ImuFaultDetail detail;
@@ -258,6 +285,10 @@ hello_world::imu::ImuFaultDetail hello_world::imu::Imu::faultDetail(uint32_t now
 
 /* Private function definitions ----------------------------------------------*/
 
+/**
+ * @brief 保存拒绝原因及当次候选读数，供停机后定位。
+ * @note  has_values 表示取得过候选三轴值，这些值可能正因 NaN 或量级异常而被拒绝。
+ */
 void hello_world::imu::Imu::RecordRejected(
     ImuFaultKind kind, uint32_t now, const float* acc, const float* gyro, float temperature)
 {
@@ -275,6 +306,10 @@ void hello_world::imu::Imu::RecordRejected(
   }
 }
 
+/**
+ * @brief 立即撤销样本有效性，并累积连续坏样本以更新长期健康状态。
+ * @note  一次拒绝就中断连续好样本计数，恢复需重新达到好样本阈值。
+ */
 void hello_world::imu::Imu::RejectSample(
     ImuFaultKind kind, uint32_t now, const float* acc, const float* gyro, float temperature)
 {
@@ -286,6 +321,10 @@ void hello_world::imu::Imu::RejectSample(
   consecutive_good_=0;
 }
 
+/**
+ * @brief 检查三轴加速度的有限性和合成模长，输入单位 m/s²。
+ * @note  过小读数单独标为 kAccLow，供控制层区分短时扰动与其他故障。
+ */
 hello_world::imu::ImuFaultKind hello_world::imu::Imu::ValidateAccel(const float acc[3])
 {
   // 保持原判据；量级判据无法替代传输和数据新鲜度检查。
@@ -303,6 +342,9 @@ hello_world::imu::ImuFaultKind hello_world::imu::Imu::ValidateAccel(const float 
   return ImuFaultKind::kNone;
 }
 
+/**
+ * @brief 逐轴检查角速度是否有限且在接受范围内，输入单位 rad/s。
+ */
 bool hello_world::imu::Imu::GyroValid(const float gyro[3])
 {
   constexpr float kGyroAbsMax = 50.0f;

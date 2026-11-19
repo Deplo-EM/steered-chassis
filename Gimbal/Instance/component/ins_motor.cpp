@@ -59,7 +59,7 @@ constexpr Dir kPitchDir = kDirRev;
 constexpr float kYawAngleOffset = 1.60879f;
 constexpr float kPitchAngleOffset = 2.91772f;
 
-/** 力矩软件限幅，单位 N·m（DM-J4310 满量程 7.5，这里先给一半） */
+/** 力矩软件限幅，单位 N·m；Gimbal 合成反馈和前馈时也读取此上限。 */
 constexpr float kYawTorqueLimit = 3.5f;
 constexpr float kPitchTorqueLimit = 3.5f;
 
@@ -67,6 +67,10 @@ DM_J4310 s_yaw_motor;
 DM_J4310 s_pitch_motor;
 bool s_inited = false;
 
+/**
+ * @brief 首次使用时按各轴 ID、方向、零偏和力矩上限装配电机对象。
+ * @note  实例初始化不发使能，CommTask 等有效授权后才执行驱动握手。
+ */
 void InitMotors()
 {
   if (s_inited) {
@@ -75,7 +79,7 @@ void InitMotors()
 
   {
     OptionalParams opt;
-    opt.input_type = InputType::kTorq;  ///< 达妙只支持力矩输入（MIT 模式）
+    opt.input_type = InputType::kTorq;  ///< 本项目通过 MIT 力矩通道执行自写位置闭环。
     opt.angle_range = AngleRange::kNegPiToPosPi;
     opt.dir = kYawDir;
     opt.angle_offset = kYawAngleOffset;
@@ -113,6 +117,10 @@ hello_world::motor::Motor *GetMotorPitch()
   return &s_pitch_motor;
 }
 
+/**
+ * @brief 区分正常失能、正常使能与故障，给自检和恢复握手提供双轴状态。
+ * @note  正常失能仍可参与就绪自检，disabled_mask 的 bit0/bit1 分别对应 yaw/pitch。
+ */
 robot::GimbalDriveFeedback GetGimbalDriveFeedback()
 {
   const auto normally_disabled = [](const DM_J4310& motor) {

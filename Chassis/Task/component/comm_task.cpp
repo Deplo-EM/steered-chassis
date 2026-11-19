@@ -113,9 +113,11 @@ void StartDbusReceive()
   robot::CriticalSection lock;
   if (!s_dbus_restart_pending) return;
   if (HAL_UARTEx_ReceiveToIdle_DMA(&huart3, s_dbus_buf, sizeof(s_dbus_buf)) == HAL_OK) {
+    // 36 字节缓冲的半满恰好是 18 字节，但它不能代替一帧结束的空闲边界。
     __HAL_DMA_DISABLE_IT(huart3.hdmarx, DMA_IT_HT);
     s_dbus_restart_pending = false;
   } else {
+    // 启动失败时保留 pending，由后续 CommTask 重试，避免一次错误永久关闭遥控。
     s_dbus_rx_start_failures = s_dbus_rx_start_failures + 1u;
   }
 }
@@ -149,6 +151,9 @@ bool RemoteAliveForWatchdog()
 }
 
 #if !defined(ROBOT_STEER_MODE_PROBE) || !ROBOT_STEER_MODE_PROBE
+/**
+ * @brief 在短临界区内读取电机输入并编码，避免与接收侧更新发生交错。
+ */
 bool EncodeMotor(hello_world::motor::Motor* motor, uint8_t* frame)
 {
   robot::CriticalSection lock;
@@ -192,6 +197,10 @@ bool SendSteerFrame(CAN_HandleTypeDef* bus, uint32_t id)
   return CAN_Send_Msg(bus, s_steer_frame, id, 8);
 }
 
+/**
+ * @brief 消费上一份舵向发送回执，分别累计控制器确认发送和未确认的次数。
+ * @note  只有 kSent 才更新最近发送样本，入邮箱成功本身不作为 TXOK 证据。
+ */
 void CollectSteerReceipt(uint32_t now)
 {
   if (s_steer_receipt.status == robot::CanTxStatus::kSent) {
@@ -205,6 +214,10 @@ void CollectSteerReceipt(uint32_t now)
   }
 }
 
+/**
+ * @brief 在新增堵转事件发生时保存邻近发送证据，随后停止清场仍可查到。
+ * @note  command_raw 为实际组帧的有符号槽值，与舵 PID 使用的 raw 标度分别解释。
+ */
 void RecordSteerStall(uint32_t now)
 {
   const auto* chassis = GetChassis();
@@ -232,6 +245,9 @@ bool s_probe_cancel = false;
 robot::CanTxReceipt s_probe_receipt;
 uint16_t s_probe_receipt_id = 0;
 
+/**
+ * @brief 把诊断构建的单轮发送回执归入对应协议结果，再释放回执供下一次使用。
+ */
 void CollectSteerProbeReceipt()
 {
   const auto status = s_probe_receipt.status;
@@ -319,7 +335,7 @@ void CommTaskInit(void)
 
   /* ---------- 3. 看门狗 ----------
    * IWDG 已经在 MX_IWDG_Init() 里启动（约 200ms 超时）。这里不喂，
-   * 第一帧合法 DBUS 到达后、由 CommTask 每 1ms 喂一次。 */
+   * 由 CommTask 在控制周期完成且遥控时效、CAN 监督满足条件后刷新。 */
 }
 
 /* ============================================================================
@@ -373,6 +389,7 @@ void CommTask(void)
     }
   }
 
+  // 电机每两拍发送一次；未发送的那一拍沿用上次提交结果，不凭空覆盖一次失败。
   static bool last_motor_submit_ok = true;
   if (motor_due) {
     bool motor_cycle_ok = true;
@@ -465,6 +482,7 @@ void CommTask(void)
   robot::GimbalChassisComm* comm = GetGimbalChassisComm();
   if (comm == nullptr) cycle_ok = false;
   static bool retry_status = false;
+  // 以下 status 仅作本地变化检测，其位布局与协议 encode 的 flags 字节不同。
   static uint8_t last_queued_status = 0;
   static int8_t last_queued_yaw_direction = 0;
   const auto* state = comm != nullptr ? &comm->chassis_data() : nullptr;
@@ -496,7 +514,9 @@ void CommTask(void)
    * 这一行在 MainTask()（控制、逆解、闭环、下发）之后执行。
    * 控制循环卡住 → 走不到这里 → 不喂 → 200ms 后复位。
    * 全板**只有这一个**喂狗调用点。 */
+  // 本拍硬件轮询失败已在编码前报告；其余失败在末尾汇总，避免同一拍重复累计。
   if(controller && !failure_reported) controller->notifyCanTxCycle(cycle_ok);
+  // 汇总失败可能刚撤销了授权，因此再检查停机边沿，及时撤销尚在邮箱中的旧帧。
   if(!CancelOnStop(controller) && controller && !failure_reported && cycle_ok)
     controller->notifyCanTxCycle(false);
 #if defined(ROBOT_STEER_MODE_PROBE) && ROBOT_STEER_MODE_PROBE
@@ -514,13 +534,14 @@ void CommTask(void)
 /* Private function definitions ----------------------------------------------*/
 
 /**
- * @brief UART 空闲中断回调：DBUS 一帧收完时进入
- * @note  必须用 extern "C"，否则中断向量表找不到这个符号。
+ * @brief 处理 USART3 DMA 接收事件，仅将长度为 18 字节的合法数据提交给遥控器。
+ * @note  extern "C" 与 HAL 的 C 链接回调名保持一致，该函数由 HAL 的 IRQ 流程调用。
  *        这里**不喂狗**，只记录「收到了一帧合法数据」。
  */
 extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef* huart,
                                            uint16_t Size)
 {
+  // 其他串口和半满事件各自处理；半满时继续接收，不能在这里抢先重启 DMA。
   if (huart != &huart3 || HAL_UARTEx_GetRxEventType(huart) == HAL_UART_RXEVENT_HT) return;
   if (huart == &huart3 && Size == hello_world::remote_control::kRcRxDataLen) {
     /* ---------- 故障注入：把拨轮两个字节改成 0xFC00 ----------
